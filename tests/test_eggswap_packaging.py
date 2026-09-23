@@ -195,3 +195,95 @@ class TheReadmeDocumentsTheRealSurfaceTests(unittest.TestCase):
                 with self.subTest(flag=flag):
                     self.assertIn(flag, select_help + help_text,
                                   f"README documents {flag}, which the parser does not have")
+
+
+class TheExportCarriesNoPersonalIdentityTests(unittest.TestCase):
+    """The export's root commit must not carry a real person's address.
+
+    An audit of PR #1092 found `bin/eggswap-export` hardcoding a live personal
+    email into the git identity of every exported tree -- and that tree becomes
+    the first commit of a PUBLIC repository, where an identity is permanent:
+    rewriting it later does not un-publish it.
+
+    My own leak scans could not have caught it. They scanned the exported
+    FILES with `--exclude-dir=.git`, and a commit identity is metadata rather
+    than a file. A scan whose search space excludes where the thing lives
+    comes back clean every time, which is the failure mode this test exists to
+    close rather than to describe.
+    """
+
+    def setUp(self):
+        script = EGGSWAP_DIR.parent / "bin" / "eggswap-export"
+        if not script.is_file():
+            self.skipTest("bin/eggswap-export is not part of this tree")
+        self.source = script.read_text(encoding="utf-8")
+
+    def test_no_email_address_is_hardcoded(self):
+        import re
+
+        addresses = set(re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}", self.source))
+        allowed = {"eggswap@localhost"}
+        self.assertEqual(
+            addresses - allowed, set(),
+            "bin/eggswap-export hardcodes a real address; the export's identity "
+            "must default to something neutral and be overridden deliberately",
+        )
+
+    def test_the_identity_comes_from_overridable_variables(self):
+        self.assertIn("EGGSWAP_EXPORT_NAME", self.source)
+        self.assertIn("EGGSWAP_EXPORT_EMAIL", self.source)
+
+    def test_the_check_can_fail(self):
+        """Negative control: the pattern must match a real address when present."""
+        import re
+
+        planted = 'git -c user.email="planted@nowhere.invalid" commit'
+        found = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}", planted)
+        self.assertEqual(found, ["planted@nowhere.invalid"])
+
+
+class TheReleaseWorkflowIsVersionGatedTests(unittest.TestCase):
+    """The public release path must build the exact package named by a tag."""
+
+    def setUp(self):
+        candidates = (
+            EGGSWAP_DIR / ".github" / "workflows" / "release.yml",
+            EGGSWAP_DIR.parent / ".github" / "workflows" / "release.yml",
+        )
+        self.path = next((path for path in candidates if path.is_file()), None)
+        if self.path is None:
+            self.skipTest("release workflow is not part of this tree")
+        self.text = self.path.read_text(encoding="utf-8")
+
+    def test_only_version_tags_trigger_a_release(self):
+        self.assertIn('tags: ["v*"]', self.text)
+        self.assertIn('expected = f"v{version}"', self.text)
+        self.assertIn('if tag != expected:', self.text)
+
+    def test_release_builds_and_attaches_standalone_distributions(self):
+        for required in (
+            "bin/eggswap-export",
+            "python -m build",
+            "gh release create",
+            "gh release upload",
+            "--verify-tag",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.text)
+        self.assertNotIn("twine upload", self.text)
+
+    def test_release_reruns_verify_assets_and_refuse_differences(self):
+        for required in (
+            "gh release view",
+            "gh release download",
+            "cmp -s",
+            "existing release asset differs",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.text)
+        self.assertNotIn("--clobber", self.text)
+
+    def test_write_permission_is_scoped_to_the_release_job(self):
+        self.assertIn("permissions:\n  contents: read", self.text)
+        self.assertIn("jobs:\n  release:", self.text)
+        self.assertIn("    permissions:\n      contents: write", self.text)

@@ -122,7 +122,7 @@ def _binding_window_headroom(availability: Available, *, profile_key: str):
     window left" against "50% of a five-hour window left" is still comparing
     unlike units, and the grouping is what refuses to do it.
     """
-    numbered = [w for w in availability.windows if w.window_seconds is not None]
+    numbered = [w for w in availability.scheduling_windows if w.window_seconds is not None]
     if not numbered:
         raise IncomparableWindows(
             f"{profile_key}: no window carries a window_seconds, so its "
@@ -134,7 +134,7 @@ def _binding_window_headroom(availability: Available, *, profile_key: str):
 
 def _longest_until_reset_key(candidate: Candidate):
     availability = _require_available(candidate)
-    resets = [w.resets_at for w in availability.windows if w.resets_at is not None]
+    resets = [w.resets_at for w in availability.scheduling_windows if w.resets_at is not None]
     if not resets:
         # No resets_at anywhere: ranked LAST, never mistaken for "resets now"
         # or "never resets" -- both would be inventing a fact we don't have.

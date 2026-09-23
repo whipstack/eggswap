@@ -98,6 +98,26 @@ class MostAbsoluteHeadroomTests(unittest.TestCase):
         with self.assertRaises(IncomparableWindows):
             cross_provider_key(unmeasured, CrossProviderStrategy.MOST_ABSOLUTE_HEADROOM, now=NOW)
 
+    def test_model_scoped_diagnostics_do_not_bind_an_unspecified_query(self):
+        shared = window("codex:primary", 25.0, window_seconds=SEVEN_DAYS)
+        exhausted_scoped = window("fable:model:fable:primary", 100.0)
+        a = Candidate(
+            profile=profile(Provider.CODEX, "a"),
+            availability=Available(
+                windows=(shared, exhausted_scoped), observed_at=NOW,
+                binding_windows=(shared,),
+            ),
+        )
+        b = candidate(
+            Provider.CLAUDE, "b", window("weekly", 40.0, window_seconds=SEVEN_DAYS)
+        )
+
+        ranked = rank_cross_provider(
+            [b, a], CrossProviderStrategy.MOST_ABSOLUTE_HEADROOM, now=NOW
+        )
+
+        self.assertEqual([item.profile.account_id for item in ranked], ["a", "b"])
+
     def test_binding_window_is_the_tightest_CAPACITY_not_the_shortest(self):
         """A code review's counterexample, pinned so it cannot come back.
 

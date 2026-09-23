@@ -107,6 +107,10 @@ class QuotaWindow:
     resets_at: Optional[float]
     observed_at: float
     source: Source = Source.OBSERVED
+    #: Provider-declared model scope, when one is available. A scoped bucket
+    #: stays visible for diagnostics but does not bind a task that named no
+    #: model; callers pass the requested model to the adapter to bind it.
+    model_scope: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.bucket:
@@ -145,6 +149,14 @@ class Available:
 
     windows: Sequence[QuotaWindow] = ()
     observed_at: float = 0.0
+    #: The subset that binds the current query. ``None`` preserves the
+    #: historical behavior (all windows bind); an explicit empty tuple means
+    #: no observed bucket binds, which adapters must report as Unknown instead.
+    binding_windows: Optional[Sequence[QuotaWindow]] = None
+
+    @property
+    def scheduling_windows(self) -> Sequence[QuotaWindow]:
+        return self.windows if self.binding_windows is None else self.binding_windows
 
     @property
     def schedulable(self) -> bool:
@@ -158,6 +170,7 @@ class Exhausted:
     reset_at: Optional[float] = None
     bucket: Optional[str] = None
     observed_at: float = 0.0
+    windows: Sequence[QuotaWindow] = ()
 
     @property
     def schedulable(self) -> bool:
@@ -195,6 +208,7 @@ class Unknown:
 
     stale_since: float
     reason: str = ""
+    windows: Sequence[QuotaWindow] = ()
 
     def __post_init__(self) -> None:
         if self.stale_since <= 0:

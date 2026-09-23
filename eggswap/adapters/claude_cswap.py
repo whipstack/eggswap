@@ -235,6 +235,7 @@ class ClaudeCswapAdapter:
             return Unknown(stale_since=now - float(age_seconds), reason="stale usage")
 
         windows = []
+        binding_windows = []
         exhausted_bucket = None
         exhausted_reset_at = None
 
@@ -251,8 +252,11 @@ class ClaudeCswapAdapter:
                     window_seconds=None,
                     resets_at=reset_at,
                     observed_at=fetched_at,
+                    model_scope=None if binding else bucket_name,
                 )
             )
+            if binding:
+                binding_windows.append(windows[-1])
             if pct >= 100.0 and binding and exhausted_bucket is None:
                 exhausted_bucket = bucket_name
                 exhausted_reset_at = reset_at
@@ -274,7 +278,17 @@ class ClaudeCswapAdapter:
                 reset_at=exhausted_reset_at, bucket=exhausted_bucket, observed_at=fetched_at
             )
 
-        return Available(windows=tuple(windows), observed_at=fetched_at)
+        if not binding_windows:
+            return Unknown(
+                stale_since=fetched_at,
+                reason="no account-wide or model-matching capacity bucket",
+                windows=tuple(windows),
+            )
+
+        return Available(
+            windows=tuple(windows), observed_at=fetched_at,
+            binding_windows=tuple(binding_windows),
+        )
 
     def launch_argv(self, profile: Profile, claude_args: List[str]) -> List[str]:
         return ["cswap", "run", profile.account_id, "--", *claude_args]

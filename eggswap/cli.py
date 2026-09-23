@@ -222,9 +222,9 @@ def _score(availability) -> float:
     """Headroom score for ranking. Only meaningful for Available -- everything
     else is ineligible in core.select.rank regardless of the number here.
     """
-    if not isinstance(availability, Available) or not availability.windows:
+    if not isinstance(availability, Available) or not availability.scheduling_windows:
         return 100.0
-    return 100.0 - max(w.used_percent for w in availability.windows)
+    return 100.0 - max(w.used_percent for w in availability.scheduling_windows)
 
 
 def _build_candidates(adapters: Sequence[Any], *, now: float, max_age_seconds: float) -> List[Candidate]:
@@ -251,12 +251,19 @@ def _render_availability(availability, *, max_age_seconds: float, now: float) ->
     if isinstance(availability, Exhausted):
         reset = "unknown" if availability.reset_at is None else f"{availability.reset_at:.0f}"
         bucket = availability.bucket or "?"
-        return f"EXHAUSTED ({bucket}, resets at {reset})"
+        detail = "; " + "; ".join(
+            w.render(max_age_seconds, now=now) for w in availability.windows
+        ) if availability.windows else ""
+        return f"EXHAUSTED ({bucket}, resets at {reset}){detail}"
     if isinstance(availability, AuthDead):
         return f"AUTH DEAD -- re-login needed ({availability.reason})" if availability.reason else "AUTH DEAD -- re-login needed"
     if isinstance(availability, Unknown):
         age = availability.age_seconds(now=now)
-        return f"UNKNOWN (last read {age:.0f}s ago)"
+        detail = "; " + "; ".join(
+            w.render(max_age_seconds, now=now) for w in availability.windows
+        ) if availability.windows else ""
+        reason = f": {availability.reason}" if availability.reason else ""
+        return f"UNKNOWN (last read {age:.0f}s ago{reason}){detail}"
     return f"UNKNOWN (unrecognized availability {type(availability).__name__!r})"  # pragma: no cover
 
 

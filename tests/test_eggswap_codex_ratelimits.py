@@ -12,7 +12,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from eggswap.adapters.codex_ratelimits import AppServerRateLimitReader
+from eggswap.adapters.codex_ratelimits import AppServerRateLimitReader, merge_rate_limit_update
 from eggswap.core.select import Policy, select
 from eggswap.core.types import Available, Candidate, Exhausted, NoCapacity, Profile, Provider, Unknown
 
@@ -211,8 +211,169 @@ class HappyPathTest(unittest.TestCase):
         self.assertIn("codex:secondary", buckets)
         self.assertEqual(buckets["codex:secondary"].window_seconds, 300 * 60)
 
+    def test_multi_bucket_read_keeps_scoped_windows_visible_without_binding_them(self) -> None:
+        reply = json.loads(_RATE_LIMITS_REPLY)
+        reply["result"]["rateLimitsByLimitId"] = {
+            "codex": reply["result"]["rateLimits"],
+            "fable": {
+                "limitId": "fable",
+                "normalModelSlug": "fable",
+                "primary": {
+                    "usedPercent": 100,
+                    "windowDurationMins": 300,
+                    "resetsAt": 1790000000,
+                },
+            },
+        }
+        proc = _FakeProcess([_INIT_REPLY, json.dumps(reply)])
+        reader = AppServerRateLimitReader(
+            codex_home=Path("/unused"), spawn=lambda *a, **k: proc, clock=lambda: 42.0
+        )
+
+        result = reader(_profile())
+
+        self.assertIsInstance(result, Available)
+        self.assertEqual({w.bucket for w in result.windows}, {
+            "codex:primary", "fable:model:fable:primary",
+        })
+        self.assertEqual([w.bucket for w in result.scheduling_windows], ["codex:primary"])
+        self.assertEqual(result.windows[1].model_scope, "fable")
+
+    def test_model_scoped_exhaustion_binds_only_for_that_requested_model(self) -> None:
+        reply = json.loads(_RATE_LIMITS_REPLY)
+        reply["result"]["rateLimitsByLimitId"] = {
+            "codex": reply["result"]["rateLimits"],
+            "fable": {
+                "limitId": "fable",
+                "normalModelSlug": "fable",
+                "primary": {"usedPercent": 100, "windowDurationMins": 300},
+            },
+        }
+        proc = _FakeProcess([_INIT_REPLY, json.dumps(reply)])
+        reader = AppServerRateLimitReader(
+            codex_home=Path("/unused"), spawn=lambda *a, **k: proc, clock=lambda: 42.0
+        )
+
+        result = reader(_profile(), model="Fable")
+
+        self.assertIsInstance(result, Exhausted)
+        self.assertEqual(result.bucket, "fable:model:fable:primary")
+        self.assertEqual(len(result.windows), 2)
+
+    def test_scoped_only_buckets_without_a_model_remain_unknown_and_visible(self) -> None:
+        reply = {
+            "id": 2,
+            "result": {
+                "rateLimitsByLimitId": {
+                    "fable": {
+                        "limitId": "fable",
+                        "normalModelSlug": "fable",
+                        "primary": {"usedPercent": 20},
+                    }
+                }
+            },
+        }
+        proc = _FakeProcess([_INIT_REPLY, json.dumps(reply)])
+        reader = AppServerRateLimitReader(
+            codex_home=Path("/unused"), spawn=lambda *a, **k: proc, clock=lambda: 42.0
+        )
+
+        result = reader(_profile())
+
+        self.assertIsInstance(result, Unknown)
+        self.assertIn("no unscoped", result.reason)
+        self.assertEqual([w.bucket for w in result.windows], ["fable:model:fable:primary"])
+
+    def test_sparse_update_changes_one_bucket_and_preserves_unmentioned_values(self) -> None:
+        initial = {
+            "codex": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 31, "windowDurationMins": 10080,
+                            "resetsAt": 1790580677},
+            },
+            "fable": {
+                "limitId": "fable", "normalModelSlug": "fable",
+                "primary": {"usedPercent": 8, "windowDurationMins": 300,
+                            "resetsAt": 1790000000},
+            },
+        }
+        update = {
+            "method": "account/rateLimits/updated",
+            "params": {"rateLimits": {
+                "limitId": "fable",
+                "normalModelSlug": None,
+                "primary": {"usedPercent": 44, "resetsAt": None},
+            }},
+        }
+
+        result = merge_rate_limit_update(initial, update)
+
+        self.assertEqual(initial["fable"]["primary"]["usedPercent"], 8)
+        self.assertEqual(result["fable"]["primary"], {
+            "usedPercent": 44, "windowDurationMins": 300,
+            "resetsAt": None,
+        })
+        self.assertEqual(result["fable"]["normalModelSlug"], "fable")
+        self.assertEqual(result["codex"], initial["codex"])
+
+    def test_reader_applies_sparse_push_to_its_last_full_read(self) -> None:
+        reply = json.loads(_RATE_LIMITS_REPLY)
+        reply["result"]["rateLimitsByLimitId"] = {
+            "codex": reply["result"]["rateLimits"],
+            "fable": {
+                "limitId": "fable", "normalModelSlug": "fable",
+                "primary": {"usedPercent": 8, "windowDurationMins": 300,
+                            "resetsAt": 1790000000},
+            },
+        }
+        proc = _FakeProcess([_INIT_REPLY, json.dumps(reply)])
+        clock_values = iter([42.0, 99.0])
+        reader = AppServerRateLimitReader(
+            codex_home=Path("/unused"), spawn=lambda *a, **k: proc,
+            clock=lambda: next(clock_values),
+        )
+        self.assertIsInstance(reader(_profile()), Available)
+
+        updated = reader.apply_notification({
+            "method": "account/rateLimits/updated",
+            "params": {"rateLimits": {
+                "limitId": "fable",
+                "primary": {"usedPercent": 44, "resetsAt": None},
+            }},
+        })
+
+        self.assertIsInstance(updated, Available)
+        by_bucket = {w.bucket: w for w in updated.windows}
+        self.assertEqual(by_bucket["fable:model:fable:primary"].used_percent, 44)
+        self.assertIsNone(by_bucket["fable:model:fable:primary"].resets_at,
+                          "an explicit null reset must not make the old reset look freshly observed")
+        self.assertEqual(by_bucket["fable:model:fable:primary"].observed_at, 99.0)
+        self.assertIn("codex:primary", by_bucket)
+        self.assertEqual(by_bucket["codex:primary"].observed_at, 42.0)
+        self.assertEqual(updated.observed_at, 42.0,
+                         "the untouched binding bucket must not become fresh from another bucket's push")
+
 
 class FailureModeTest(unittest.TestCase):
+    def test_sparse_update_before_a_full_snapshot_stays_unknown(self) -> None:
+        reader = AppServerRateLimitReader(codex_home=Path("/unused"), clock=lambda: 7.0)
+
+        result = reader.apply_notification({
+            "method": "account/rateLimits/updated",
+            "params": {"rateLimits": {"limitId": "codex", "primary": {"usedPercent": 1}}},
+        })
+
+        self.assertIsInstance(result, Unknown)
+        self.assertFalse(result.schedulable)
+        self.assertIn("before a full", result.reason)
+
+    def test_unaddressable_sparse_update_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no limitId"):
+            merge_rate_limit_update({}, {
+                "method": "account/rateLimits/updated",
+                "params": {"rateLimits": {"primary": {"usedPercent": 1}}},
+            })
+
     def test_spawn_failure_is_unknown(self) -> None:
         def _spawn(*a, **k):
             raise OSError("no such file: codex")

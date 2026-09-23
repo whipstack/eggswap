@@ -1,0 +1,84 @@
+name: Eggswap Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eggswap-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify and publish GitHub release assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Require the tag to match the package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          metadata = tomllib.loads(Path("eggswap/pyproject.toml").read_text())
+          version = metadata["project"]["version"]
+          tag = os.environ["RELEASE_TAG"]
+          expected = f"v{version}"
+          if tag != expected:
+              raise SystemExit(f"release tag {tag!r} does not match package version {expected!r}")
+          print(f"verified {tag} matches eggswap {version}")
+          PY
+
+      - name: Export and test the standalone repository tree
+        run: bin/eggswap-export "$RUNNER_TEMP/eggswap-export"
+
+      - name: Build wheel and source distribution
+        working-directory: ${{ runner.temp }}/eggswap-export
+        run: |
+          python -m pip install --disable-pip-version-check build
+          python -m build
+          python -m pip install --no-deps dist/eggswap-*.whl
+          eggswap --help
+
+      - name: Create GitHub Release and attach verified distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          assets="$RUNNER_TEMP/eggswap-export/dist"
+          existing="$RUNNER_TEMP/eggswap-existing-release-assets"
+          mkdir -p "$existing"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            for asset in "$assets"/*; do
+              name="${asset##*/}"
+              if gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+                gh release download "$RELEASE_TAG" --pattern "$name" --dir "$existing"
+                if ! cmp -s "$asset" "$existing/$name"; then
+                  echo "existing release asset differs: $name" >&2
+                  exit 1
+                fi
+              else
+                gh release upload "$RELEASE_TAG" "$asset"
+              fi
+            done
+          else
+            gh release create "$RELEASE_TAG" "$assets"/* --verify-tag --generate-notes
+          fi

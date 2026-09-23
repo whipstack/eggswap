@@ -112,6 +112,23 @@ class CodexHomeAdapterTest(unittest.TestCase):
 
         self.assertIs(availability, sentinel)
 
+    def test_model_is_forwarded_to_reader_without_model_fallback(self):
+        home = self.root / "a"
+        _write_auth(home, **_chatgpt_auth("acct-a"))
+        calls = []
+
+        def reader(profile, *, model=None):
+            calls.append((profile.account_id, model))
+            return Unknown(stale_since=12.0, reason="no matching model bucket")
+
+        adapter = CodexHomeAdapter([home], rate_limit_reader=reader)
+        profile = adapter.profiles()[0]
+
+        result = adapter.availability(profile, model="fable")
+
+        self.assertIsInstance(result, Unknown)
+        self.assertEqual(calls, [("acct-a", "fable")])
+
     def test_launch_env_sets_codex_home_and_does_not_mutate_base(self):
         home = self.root / "a"
         _write_auth(home, **_chatgpt_auth("acct-a"))

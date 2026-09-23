@@ -173,7 +173,7 @@ the account's own session state and rendered with the honesty contract
 above.
 
 **Codex does not have a live capacity signal yet.** A bounded static probe
-(`docs/codex-ratelimits-probe.md`) confirmed the installed
+(`docs/research/eggswap/codex-ratelimits-probe.md`) confirmed the installed
 `codex` binary supports an `account/rateLimits/read` JSON-RPC method and
 recovered the *names* of its response fields (`RateLimitSnapshot`,
 `RateLimitWindow`, etc.) from the binary's string table — but no live call

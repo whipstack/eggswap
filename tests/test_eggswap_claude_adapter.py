@@ -212,8 +212,20 @@ class AvailabilityTests(unittest.TestCase):
         self.assertTrue(availability.schedulable)
         buckets = {w.bucket: w.used_percent for w in availability.windows}
         self.assertEqual(buckets, {"fiveHour": 4.0, "sevenDay": 2.0, "Fable": 0.0})
+        self.assertEqual({w.bucket for w in availability.scheduling_windows},
+                         {"fiveHour", "sevenDay"})
+        self.assertEqual(availability.windows[2].model_scope, "Fable")
         for w in availability.windows:
             self.assertEqual(w.observed_at, availability.observed_at)
+
+    def test_requested_model_adds_only_its_scoped_window_to_binding(self):
+        adapter = self._adapter()
+        profile = Profile(provider=Provider.CLAUDE, account_id="4")
+        availability = adapter.availability(profile, model="Fable")
+
+        self.assertIsInstance(availability, Available)
+        self.assertEqual({w.bucket for w in availability.scheduling_windows},
+                         {"fiveHour", "sevenDay", "Fable"})
 
     def test_relogin_required_maps_to_auth_dead_not_the_frozen_numbers(self):
         adapter = self._adapter()

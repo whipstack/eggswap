@@ -169,7 +169,7 @@ class CodexHomeAdapter:
         homes: List[Path],
         *,
         clock: Callable[[], float] = time.time,
-        rate_limit_reader: Optional[Callable[[Profile], Any]] = None,
+        rate_limit_reader: Optional[Callable[..., Any]] = None,
     ) -> None:
         self._homes = list(homes)
         self._clock = clock
@@ -220,7 +220,8 @@ class CodexHomeAdapter:
         return result
 
     def availability(
-        self, profile: Profile, *, max_age_seconds: float = 300.0
+        self, profile: Profile, *, max_age_seconds: float = 300.0,
+        model: Optional[str] = None,
     ) -> Availability:
         now = self._clock()
         home = self._home_for_profile(profile)
@@ -241,7 +242,18 @@ class CodexHomeAdapter:
             return Unknown(
                 stale_since=now, reason="no capacity signal for codex on this install"
             )
-        return self._rate_limit_reader(profile)
+        if model is None:
+            return self._rate_limit_reader(profile)
+        try:
+            return self._rate_limit_reader(profile, model=model)
+        except TypeError as exc:
+            # An old injected reader cannot prove capacity for a model-scoped
+            # bucket. Do not retry without the model and accidentally bind a
+            # different bucket.
+            return Unknown(
+                stale_since=now,
+                reason=f"rate-limit reader does not support model-scoped queries: {exc}",
+            )
 
     def launch_env(
         self, profile: Profile, base_env: Optional[Mapping[str, str]] = None

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/homebrew/opt/python@3.14/bin/python3.14
 """Demonstrate a goal-preserving Claude -> Codex handoff (Issue #1096 AC2/AC3).
 
 #1096 says PR #1092 "does not yet demonstrate a goal-preserving
