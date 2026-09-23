@@ -1,14 +1,15 @@
-#!/opt/homebrew/opt/python@3.14/bin/python3.14
+#!/usr/bin/env python3
 """Demonstrate a goal-preserving Claude -> Codex handoff (Issue #1096 AC2/AC3).
 
 #1096 says PR #1092 "does not yet demonstrate a goal-preserving
 Claude-to-Codex checkpoint handoff". A transcript claiming one is not a
 demonstration, so this is the demonstration, committed and re-runnable.
 
-  --live   selects real accounts, takes real leases, and actually RUNS Claude
-           through `cswap run` so the artifact hash is of real output. Costs
-           a little quota; that is the point -- a handoff of a synthetic
-           artifact proves nothing about carrying real verified work across.
+  --live   selects real accounts, takes real leases, runs Claude through
+           `cswap run`, then starts a NEW Codex `exec` under the selected
+           CODEX_HOME. The verified Claude artifact and checkpoint are sent
+           in Codex's prompt, and its native thread id is captured. This costs
+           provider quota; use only when that is authorized.
   (default) the same flow with a fake runner, so the negative controls can be
            exercised anywhere, including where no account exists.
 
@@ -19,6 +20,9 @@ from __future__ import annotations
 
 import dataclasses as dc
 import hashlib
+import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,15 +31,145 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from eggswap.core.handoff import checkpoint, continuity_violations  # noqa: E402
+from eggswap.core.handoff import (  # noqa: E402
+    SessionRef, checkpoint, continuity_violations, resume,
+)
 from eggswap.core.select import Policy, select  # noqa: E402
 from eggswap.core.store import LeaseStore  # noqa: E402
 from eggswap.core.types import (  # noqa: E402
     Available, Candidate, NoCapacity, Profile, Provider, QuotaWindow, WorkSpec,
 )
 
-GOAL = WorkSpec(goal_id="G-handoff-demo", contract_version="v1",
-                spec_hash="c0ffee", model="sonnet", description="two-part task")
+_SPEC_BODY = {
+    "goal_id": "G-handoff-demo",
+    "contract_version": "v1",
+    "model": "",
+    "description": "cross-provider checkpoint continuity demonstration",
+}
+GOAL = WorkSpec(
+    **_SPEC_BODY,
+    spec_hash=hashlib.sha256(
+        json.dumps(_SPEC_BODY, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest(),
+)
+LIVE_WALL_SECONDS = 240
+
+
+def _checkpoint_prompt(checkpoint, artifact_text: str) -> str:
+    """Serialize the exact continuation inputs for a fresh Codex session."""
+    artifact_hash = hashlib.sha256(artifact_text.encode()).hexdigest()
+    if artifact_hash not in checkpoint.completed:
+        raise ValueError("artifact content does not match a completed checkpoint hash")
+    payload = {
+        "checkpoint": {
+            "goal_id": checkpoint.workspec.goal_id,
+            "contract_version": checkpoint.workspec.contract_version,
+            "spec_hash": checkpoint.workspec.spec_hash,
+            "completed": list(checkpoint.completed),
+            "remaining": list(checkpoint.remaining),
+            "from_profile": checkpoint.from_profile,
+        },
+        "verified_artifact": {
+            "sha256": artifact_hash,
+            "text": artifact_text,
+        },
+    }
+    return (
+        "Continue the authorized task from this checkpoint in a new native "
+        "Codex session. Recompute the included artifact SHA-256 and confirm "
+        "it matches before continuing. Do only the one remaining item. Reply "
+        "with exactly PART_TWO_DONE after you have read and verified it.\n"
+        + json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def _complete_checkpoint(lease, before, output: str, session: SessionRef):
+    """Record the exact-checked second-stage result on the Codex lease."""
+    artifact = hashlib.sha256(output.encode()).hexdigest()
+    return checkpoint(
+        lease,
+        completed=(*before.completed, artifact),
+        remaining=(),
+        session=session,
+        generation=before.generation + 1,
+        budget_spent=before.budget_spent,
+        budget_ceiling=before.budget_ceiling,
+        clock=time.time,
+    )
+
+
+def _parse_codex_events(stdout: str):
+    """Return the native Codex session and final answer from ``exec --json``."""
+    thread_id = None
+    final_messages = []
+    turn_completed = False
+    for line_number, line in enumerate((stdout or "").splitlines(), 1):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid Codex JSONL event at line {line_number}") from exc
+        if not isinstance(event, dict):
+            raise ValueError(f"invalid Codex event at line {line_number}")
+        kind = event.get("type")
+        if kind == "thread.started":
+            value = event.get("thread_id")
+            if not isinstance(value, str) or not value:
+                raise ValueError("Codex thread.started event has no thread_id")
+            if thread_id is not None and thread_id != value:
+                raise ValueError("Codex exec emitted conflicting thread ids")
+            thread_id = value
+        elif kind == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                value = item.get("text")
+                if isinstance(value, str):
+                    final_messages.append(value)
+            elif isinstance(item, dict) and item.get("type") == "error":
+                raise ValueError("Codex exec emitted an error item")
+        elif kind == "turn.completed":
+            turn_completed = True
+        elif kind in ("turn.failed", "error"):
+            raise ValueError("Codex exec did not complete successfully")
+    if thread_id is None:
+        raise ValueError("Codex exec returned no native thread id")
+    if not turn_completed:
+        raise ValueError("Codex exec returned no turn.completed event")
+    if not final_messages:
+        raise ValueError("Codex exec returned no completed agent message")
+    return SessionRef(Provider.CODEX, thread_id), final_messages[-1].strip()
+
+
+def _run_codex_checkpoint(adapter, profile, checkpoint, artifact_text: str,
+                          *, timeout_seconds: float, runner=subprocess.run,
+                          which=shutil.which):
+    """Run the second stage in a new read-only Codex session for this profile."""
+    codex = which("codex")
+    if codex is None:
+        raise RuntimeError("codex binary not found on PATH")
+    cmd = [
+        codex, "exec", "--json", "--ephemeral", "--sandbox", "read-only",
+        "--skip-git-repo-check", "-",
+    ]
+    # Keep the opt-in API profile lane closed even if the parent shell has
+    # credentials set. This demo selects subscription profiles only.
+    inherited = {
+        key: value for key, value in os.environ.items()
+        if key not in {"OPENAI_API_KEY", "CODEX_API_KEY"}
+    }
+    env = adapter.launch_env(profile, inherited)
+    with tempfile.TemporaryDirectory(prefix="eggswap-codex-handoff-") as workdir:
+        proc = runner(
+            cmd,
+            capture_output=True,
+            text=True,
+            input=_checkpoint_prompt(checkpoint, artifact_text),
+            timeout=timeout_seconds,
+            env=env,
+            cwd=workdir,
+        )
+    if proc.returncode != 0:
+        raise RuntimeError(f"codex exec failed with exit code {proc.returncode}")
+    return _parse_codex_events(proc.stdout)
 
 
 def _pool(adapter):
@@ -61,7 +195,9 @@ def _fake_pool(provider, account_id):
 
 def main(argv) -> int:
     live = "--live" in argv
+    deadline = time.monotonic() + LIVE_WALL_SECONDS if live else None
     store = LeaseStore(Path(tempfile.mkdtemp()))
+    codex_adapter = None
 
     if live:
         from eggswap.adapters.claude_cswap import ClaudeCswapAdapter
@@ -92,15 +228,30 @@ def main(argv) -> int:
     if live:
         from eggswap.adapters.claude_cswap import ClaudeCswapAdapter
 
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            print("FAIL: live handoff exceeded its four-minute wall budget")
+            store.release(lease1)
+            return 1
         argv_run = ClaudeCswapAdapter().launch_argv(
             first.profile, ["-p", "Reply with exactly: PART_ONE_DONE"]
         )
-        output = subprocess.run(argv_run, capture_output=True, text=True,
-                                timeout=180).stdout.strip()
+        try:
+            proc = subprocess.run(argv_run, capture_output=True, text=True,
+                                  timeout=remaining_seconds)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"FAIL: Claude checkpoint stage failed: {type(exc).__name__}")
+            store.release(lease1)
+            return 1
+        output = proc.stdout.strip()
     else:
         output = "PART_ONE_DONE"
-    artifact = hashlib.sha256(output.encode()).hexdigest()[:16]
-    print(f"   produced {output!r}  artifact sha={artifact}")
+    if output != "PART_ONE_DONE":
+        print("FAIL: Claude output did not match the independent exact-output check")
+        store.release(lease1)
+        return 1
+    artifact = hashlib.sha256(output.encode()).hexdigest()
+    print(f"   produced verified output {output!r}  artifact sha={artifact[:16]}…")
     before = checkpoint(lease1, completed=(artifact,), remaining=("part-two",),
                         clock=time.time)
     store.release(lease1)
@@ -109,9 +260,40 @@ def main(argv) -> int:
                            workspec=GOAL)
     print(f"\n2. CODEX   {second.profile.key}  lease fence={lease2.fence}")
     if live and codex_adapter is not None:
-        env = codex_adapter.launch_env(second.profile, {})
-        print(f"   CODEX_HOME={env['CODEX_HOME']}")
-    after = dc.replace(before, from_profile=second.profile.key)
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            print("FAIL: live handoff exceeded its four-minute wall budget")
+            store.release(lease2)
+            return 1
+        try:
+            codex_session, codex_output = _run_codex_checkpoint(
+                codex_adapter,
+                second.profile,
+                before,
+                output,
+                timeout_seconds=remaining_seconds,
+            )
+            print("   started a new native Codex thread under the selected CODEX_HOME")
+            if codex_output == "PART_TWO_DONE":
+                print("   Codex completed the remaining checkpoint item")
+                after = _complete_checkpoint(
+                    lease2, before, codex_output, codex_session
+                )
+            else:
+                print("FAIL: Codex output did not match the exact completion check")
+                after = resume(before, lease2, session=codex_session)
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+            print(f"FAIL: Codex checkpoint continuation failed: {type(exc).__name__}: {exc}")
+            after = dc.replace(before, from_profile=second.profile.key)
+            codex_output = None
+    else:
+        codex_output = "PART_TWO_DONE"
+        after = _complete_checkpoint(
+            lease2,
+            before,
+            codex_output,
+            SessionRef(Provider.CODEX, "fake-codex-thread"),
+        )
 
     genuine = continuity_violations(before, after)
     print(f"\n3. CONTINUITY  violations={genuine or 'NONE'}")
@@ -141,6 +323,8 @@ def main(argv) -> int:
         return 1
     if failures:
         print(f"\nFAIL: {failures} negative control(s) were accepted")
+        return 1
+    if live and codex_output != "PART_TWO_DONE":
         return 1
     print("\nOK: genuine handoff passes, every negative control refuses")
     return 0
