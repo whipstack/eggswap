@@ -40,7 +40,7 @@ _UNSOLICITED_NOTIFICATION = json.dumps(
     {"method": "account/updated", "params": {"authMode": "chatgpt", "planType": "pro"}}
 )
 
-# Verbatim (redacted) shape from docs/research/eggswap/codex-ratelimits-live.md, section 2.
+# Verbatim (redacted) shape from docs/research/eggswap/codex-ratelimits-live.md #2.
 _RATE_LIMITS_REPLY = json.dumps(
     {
         "id": 2,
@@ -211,132 +211,6 @@ class HappyPathTest(unittest.TestCase):
         self.assertIn("codex:secondary", buckets)
         self.assertEqual(buckets["codex:secondary"].window_seconds, 300 * 60)
 
-    def test_multi_bucket_map_preserves_every_bucket_and_window(self) -> None:
-        reply = json.loads(_RATE_LIMITS_REPLY)
-        codex = reply["result"]["rateLimits"]
-        reply["result"]["rateLimitsByLimitId"] = {
-            "codex": codex,
-            "codex_other": {
-                "limitId": "codex_other",
-                "limitName": "other",
-                "primary": {
-                    "usedPercent": 88,
-                    "windowDurationMins": 30,
-                    "resetsAt": 1790000100,
-                },
-                "secondary": {
-                    "usedPercent": 12,
-                    "windowDurationMins": 1440,
-                    "resetsAt": 1790000200,
-                },
-                "rateLimitReachedType": None,
-                "spendControlReached": False,
-            },
-        }
-        proc = _FakeProcess([_INIT_REPLY, json.dumps(reply)])
-        reader = AppServerRateLimitReader(
-            codex_home=Path("/unused"), spawn=lambda *a, **k: proc, clock=lambda: 42.0
-        )
-
-        result = reader(_profile())
-
-        self.assertIsInstance(result, Available)
-        windows = {window.bucket: window for window in result.windows}
-        self.assertEqual(
-            set(windows),
-            {"codex:primary", "codex_other:primary", "codex_other:secondary"},
-        )
-        self.assertEqual(windows["codex_other:primary"].used_percent, 88)
-        self.assertEqual(windows["codex_other:primary"].window_seconds, 30 * 60)
-        self.assertEqual(windows["codex_other:primary"].resets_at, 1790000100)
-        self.assertEqual(windows["codex_other:secondary"].used_percent, 12)
-
-    def test_exhausted_additional_bucket_is_not_hidden_by_healthy_legacy_view(self) -> None:
-        reply = json.loads(_RATE_LIMITS_REPLY)
-        reply["result"]["rateLimitsByLimitId"] = {
-            "codex": reply["result"]["rateLimits"],
-            "codex_other": {
-                "limitId": "codex_other",
-                "primary": {
-                    "usedPercent": 100,
-                    "windowDurationMins": 30,
-                    "resetsAt": 1790000100,
-                },
-                "secondary": None,
-            },
-        }
-        proc = _FakeProcess([_INIT_REPLY, json.dumps(reply)])
-        reader = AppServerRateLimitReader(
-            codex_home=Path("/unused"), spawn=lambda *a, **k: proc, clock=lambda: 42.0
-        )
-
-        result = reader(_profile())
-
-        self.assertIsInstance(result, Exhausted)
-        self.assertEqual(result.bucket, "codex_other:primary")
-        self.assertEqual(result.reset_at, 1790000100)
-        with self.assertRaises(NoCapacity):
-            select(
-                [Candidate(profile=_profile(), availability=result, score=100.0)],
-                Policy(allow_providers=(Provider.CODEX,)),
-                now=42.0,
-            )
-
-        import io
-        from eggswap.cli import main as cli_main
-
-        class Adapter:
-            provider = Provider.CODEX
-
-            def profiles(self):
-                return [_profile()]
-
-            def availability(self, profile, *, max_age_seconds=300.0):
-                return result
-
-            def launch_env(self, profile, base_env=None):
-                return {**(base_env or {}), "CODEX_HOME": "/tmp/fake-codex"}
-
-        spawned = []
-        output = io.StringIO()
-        rc = cli_main(
-            ["run", _profile().key, "--", "codex", "exec"],
-            adapters=[Adapter()],
-            out=output,
-            now=42.0,
-            runner=lambda argv, **kwargs: spawned.append(argv),
-            store=False,
-            quarantine=False,
-        )
-        self.assertEqual(rc, 3, output.getvalue())
-        self.assertEqual(spawned, [], "an exhausted additional bucket must not spawn")
-
-    def test_malformed_multi_bucket_entry_degrades_to_unknown(self) -> None:
-        reply = json.loads(_RATE_LIMITS_REPLY)
-        reply["result"]["rateLimitsByLimitId"] = {"codex_other": "not-a-snapshot"}
-        proc = _FakeProcess([_INIT_REPLY, json.dumps(reply)])
-        reader = AppServerRateLimitReader(
-            codex_home=Path("/unused"), spawn=lambda *a, **k: proc, clock=lambda: 42.0
-        )
-
-        result = reader(_profile())
-
-        self.assertIsInstance(result, Unknown)
-        self.assertIn("malformed rateLimitsByLimitId entry", result.reason)
-
-    def test_boolean_percentage_is_not_coerced_into_a_quota_number(self) -> None:
-        reply = json.loads(_RATE_LIMITS_REPLY)
-        reply["result"]["rateLimits"]["primary"]["usedPercent"] = True
-        proc = _FakeProcess([_INIT_REPLY, json.dumps(reply)])
-        reader = AppServerRateLimitReader(
-            codex_home=Path("/unused"), spawn=lambda *a, **k: proc, clock=lambda: 42.0
-        )
-
-        result = reader(_profile())
-
-        self.assertIsInstance(result, Unknown)
-        self.assertIn("usedPercent is missing or not numeric", result.reason)
-
 
 class FailureModeTest(unittest.TestCase):
     def test_spawn_failure_is_unknown(self) -> None:
@@ -412,7 +286,7 @@ class FailureModeTest(unittest.TestCase):
         result = reader(_profile())
 
         self.assertIsInstance(result, Unknown)
-        self.assertIn("no populated quota windows", result.reason)
+        self.assertIn("missing primary window", result.reason)
 
 
 if __name__ == "__main__":

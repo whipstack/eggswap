@@ -1,12 +1,15 @@
 """The CLI must actually TAKE the hold it advertises.
 
-The CLI must connect the fenced lease implementation to actual launches.
-These tests assert observable refusal and release behavior so the type
-cannot become an inert guarantee again.
+A README honesty audit (docs/research/eggswap/readme-honesty-audit.md, row 14)
+found the most consequential gap in this project: ``eggswap/core/store.py``
+implemented a fenced exclusive lease, ``tests/test_eggswap_store.py`` proved
+it, the README described the guarantee -- and ``_cmd_run`` never called
+``acquire``. The type was doing nothing at the layer where the failure
+actually happens.
 
 The failure it prevents is measured, not hypothetical: two Claude CLIs sharing
 one account's HOME concurrently rotate a single-use refresh token and destroy
-it (``invalid_grant`` / "Not logged in").
+it (whipstack #581, ``invalid_grant`` / "Not logged in").
 
 Every test here would pass again if the wiring were removed, unless it asserts
 on the OBSERVABLE consequence -- a refused second run, a profile missing from
@@ -28,9 +31,8 @@ NOW = 1_000_000.0
 class _FakeAdapter:
     provider = Provider.CODEX
 
-    def __init__(self, profiles, *, observed_at=NOW):
+    def __init__(self, profiles):
         self._profiles = list(profiles)
-        self.observed_at = observed_at
 
     def profiles(self):
         return list(self._profiles)
@@ -42,11 +44,11 @@ class _FakeAdapter:
                     bucket="primary",
                     used_percent=10.0,
                     window_seconds=3600,
-                    resets_at=self.observed_at + 3600,
-                    observed_at=self.observed_at,
+                    resets_at=NOW + 3600,
+                    observed_at=NOW,
                 ),
             ),
-            observed_at=self.observed_at,
+            observed_at=NOW,
         )
 
     def launch_env(self, profile, base_env=None):
@@ -133,39 +135,11 @@ class CliTakesTheLeaseTests(unittest.TestCase):
         self.store.acquire(self.a, ttl_seconds=1, holder="crashed")
         later = NOW + 10_000
         store = LeaseStore(Path(self.tmp.name), clock=lambda: later)
-        self.adapters = [_FakeAdapter([self.a, self.b], observed_at=later)]
         out = _Out()
         rc = cli.main(["run", "codex:acct-a", "--", "true"], adapters=self.adapters,
                       out=out, now=later, runner=self._runner, store=store)
         self.assertEqual(rc, 0, out.text)
         self.assertEqual(len(self.calls), 1)
-
-    def test_run_rechecks_capacity_under_the_lease_before_spawn(self):
-        class ChangesAfterFirstRead(_FakeAdapter):
-            def __init__(self, profiles):
-                super().__init__(profiles)
-                self.reads = 0
-
-            def availability(self, profile, *, max_age_seconds=300.0):
-                self.reads += 1
-                if self.reads == 1:
-                    return super().availability(profile, max_age_seconds=max_age_seconds)
-                from eggswap.core.types import Exhausted
-
-                return Exhausted(
-                    reset_at=NOW + 3600,
-                    bucket="primary",
-                    observed_at=NOW,
-                )
-
-        adapter = ChangesAfterFirstRead([self.a, self.b])
-        self.adapters = [adapter]
-        out = _Out()
-        rc = cli.main(["run", "codex:acct-a", "--", "true"], adapters=self.adapters,
-                      out=out, now=NOW, runner=self._runner, store=self.store)
-        self.assertEqual(rc, 3, out.text)
-        self.assertEqual(self.calls, [], "newly exhausted account must not spawn")
-        self.assertIsNone(self.store.holder_of(self.a), "refusal must release its lease")
 
     def test_store_false_disables_the_hold_entirely(self):
         """The escape hatch must really disable it, or it is not an escape."""

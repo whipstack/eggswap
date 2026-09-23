@@ -20,7 +20,7 @@ TEST_SIZE = "medium"
 TEST_SIZE_REASON = (
     "test_concurrent_subprocess_acquire_exactly_one_wins forks real OS "
     "processes to exercise the fcntl.flock exclusion that two independent "
-    "Claude/Codex CLIs -- not threads -- actually race under concurrent use."
+    "Claude/Codex CLIs -- not threads -- actually race under (Issue #581)."
 )
 
 

@@ -4,16 +4,13 @@ Run: python3 -m unittest tests.test_eggswap_codex_adapter -v
 """
 from __future__ import annotations
 
-import base64
 import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
-from eggswap.adapters.codex_home import CodexHomeAdapter, _managed_preferences, _store_mode
-from eggswap.core.select import Policy, select
-from eggswap.core.types import Available, Candidate, NoCapacity, Profile, Provider, Unknown
+from eggswap.adapters.codex_home import CodexHomeAdapter
+from eggswap.core.types import Available, Profile, Provider, Unknown
 
 _FAKE_TOKEN = "REDACTED-NOT-A-TOKEN"
 
@@ -41,78 +38,6 @@ class CodexHomeAdapterTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        preferences = mock.patch(
-            "eggswap.adapters.codex_home._managed_preferences", return_value={}
-        )
-        preferences.start()
-        self.addCleanup(preferences.stop)
-
-    def _store_probe(self, home):
-        return _store_mode(
-            home,
-            system_policy_dir=self.root / "no-system-policy",
-            managed_preferences={},
-        )
-
-    def test_conflicting_system_and_user_store_settings_are_unknown(self):
-        home = self.root / "home"
-        _write_auth(home, **_chatgpt_auth("acct-a"))
-        (home / "config.toml").write_text('cli_auth_credentials_store = "file"\n')
-        policy_dir = self.root / "system"
-        policy_dir.mkdir()
-        (policy_dir / "requirements.toml").write_text(
-            'cli_auth_credentials_store = "keyring"\n'
-        )
-
-        mode = _store_mode(home, system_policy_dir=policy_dir, managed_preferences={})
-
-        self.assertEqual(mode, "unknown")
-
-    def test_conflicting_mdm_and_system_requirements_are_unknown(self):
-        home = self.root / "home"
-        _write_auth(home, **_chatgpt_auth("acct-a"))
-        policy_dir = self.root / "system"
-        policy_dir.mkdir()
-        (policy_dir / "requirements.toml").write_text(
-            'cli_auth_credentials_store = "keyring"\n'
-        )
-
-        mode = _store_mode(
-            home,
-            system_policy_dir=policy_dir,
-            managed_preferences={
-                "requirements_toml_base64": 'cli_auth_credentials_store = "ephemeral"\n'
-            },
-        )
-
-        self.assertEqual(mode, "unknown")
-
-    def test_mdm_requirement_reports_non_file_store(self):
-        home = self.root / "home"
-        _write_auth(home, **_chatgpt_auth("acct-a"))
-
-        mode = _store_mode(
-            home,
-            system_policy_dir=self.root / "no-system-policy",
-            managed_preferences={
-                "requirements_toml_base64": 'cli_auth_credentials_store = "keyring"\n'
-            },
-        )
-
-        self.assertEqual(mode, "keyring")
-
-    def test_mdm_payload_is_decoded_without_emitting_its_contents(self):
-        payload = 'cli_auth_credentials_store = "ephemeral"\n'
-        encoded = base64.b64encode(payload.encode()).decode()
-        with mock.patch("eggswap.adapters.codex_home.sys.platform", "darwin"):
-            with mock.patch("eggswap.adapters.codex_home.subprocess.run") as run:
-                run.side_effect = [
-                    mock.Mock(returncode=0, stdout=encoded),
-                    mock.Mock(returncode=1, stdout=""),
-                ]
-                preferences = _managed_preferences()
-
-        self.assertEqual(preferences, {"requirements_toml_base64": payload})
 
     def test_two_homes_two_distinct_profiles(self):
         home_a = self.root / "a"
@@ -184,66 +109,6 @@ class CodexHomeAdapterTest(unittest.TestCase):
         adapter = CodexHomeAdapter([home], rate_limit_reader=lambda profile: sentinel)
         profile = adapter.profiles()[0]
         availability = adapter.availability(profile)
-
-        self.assertIs(availability, sentinel)
-
-    def test_unverified_keyring_home_is_unknown_in_a_multi_home_set(self):
-        file_home = self.root / "file-home"
-        keyring_home = self.root / "keyring-home"
-        _write_auth(file_home, **_chatgpt_auth("acct-file"))
-        _write_auth(keyring_home, **_chatgpt_auth("acct-keyring"))
-        (keyring_home / "config.toml").write_text(
-            'cli_auth_credentials_store = "keyring"\n'
-        )
-        reader_calls = []
-        sentinel = Available(windows=(), observed_at=1.0)
-
-        def reader(profile):
-            reader_calls.append(profile.account_id)
-            return sentinel
-
-        adapter = CodexHomeAdapter(
-            [file_home, keyring_home],
-            rate_limit_reader=reader,
-            store_mode_reader=self._store_probe,
-        )
-        profiles = {profile.account_id: profile for profile in adapter.profiles()}
-
-        keyring_availability = adapter.availability(profiles["acct-keyring"])
-        file_availability = adapter.availability(profiles["acct-file"])
-
-        self.assertIsInstance(keyring_availability, Unknown)
-        self.assertIn("account isolation is not established", keyring_availability.reason)
-        self.assertIs(file_availability, sentinel)
-        self.assertEqual(reader_calls, ["acct-file"])
-        chosen = select(
-            [
-                Candidate(profiles["acct-keyring"], keyring_availability, score=100.0),
-                Candidate(profiles["acct-file"], file_availability, score=1.0),
-            ],
-            Policy(allow_providers=(Provider.CODEX,)),
-            now=1.0,
-        )
-        self.assertEqual(chosen.profile.account_id, "acct-file")
-        with self.assertRaises(NoCapacity):
-            select(
-                [Candidate(profiles["acct-keyring"], keyring_availability, score=100.0)],
-                Policy(allow_providers=(Provider.CODEX,)),
-                now=1.0,
-            )
-
-    def test_single_keyring_home_can_use_its_capacity_reader(self):
-        home = self.root / "keyring-home"
-        _write_auth(home, **_chatgpt_auth("acct-keyring"))
-        (home / "config.toml").write_text('cli_auth_credentials_store = "keyring"\n')
-        sentinel = Available(windows=(), observed_at=1.0)
-        adapter = CodexHomeAdapter(
-            [home],
-            rate_limit_reader=lambda profile: sentinel,
-            store_mode_reader=self._store_probe,
-        )
-
-        availability = adapter.availability(adapter.profiles()[0])
 
         self.assertIs(availability, sentinel)
 

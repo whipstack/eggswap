@@ -42,13 +42,6 @@ not an array/map of accounts (confirmed by the key list above: no nesting like
 `account_id`. There is no secondary per-account credential file found in `~/.codex/` (directory
 listing of all 44 entries showed no `auth-*.json`, `accounts/`, or similar).
 
-eggswap uses this evidence conservatively: with multiple configured Codex
-profiles, a profile whose effective store is not confirmed as file-backed is
-reported `UNKNOWN` and cannot be selected. A single non-file-backed profile
-may still use its measured capacity reader, but that does not establish that
-another `CODEX_HOME` would reach a separate keyring entry. Keyring namespacing
-remains unverified.
-
 ## 3. Is `[profiles.*]` in `config.toml` an account credential, or only a preset?
 
 **Method:** read `~/.codex/config.toml` directly (values that looked secret-shaped were

@@ -1,4 +1,4 @@
-"""Tests for eggswap.core.quarantine -- route-failure memory.
+"""Tests for eggswap.core.quarantine -- route-failure memory (Issue #27).
 
 TEST_SIZE = "small": no subprocess, no sockets, no threads, no sleeps. Time
 is entirely driven by the injected FakeClock below.

@@ -1,4 +1,4 @@
-"""Tests for eggswap.core.handoff -- checkpoint continuity and safe resume.
+"""Tests for eggswap.core.handoff -- #1037 acceptance criterion 5.
 
 Criterion 5: "A cross-provider handoff preserves the exact goal/contract
 version and verified artifact hashes, resumes only remaining authorized
@@ -166,7 +166,7 @@ class ContinuityViolationsTests(unittest.TestCase):
         self.assertEqual(continuity_violations(before, after), [])
 
     def test_naming_the_goal_correctly_does_not_excuse_a_silently_dropped_artifact(self):
-        """The continuity trap: a matching goal cannot hide dropped work.
+        """#1037 criterion 5's own trap, encoded directly.
 
         Every human-readable field (goal_id, contract_version, spec_hash,
         description, from_profile) agrees between before/after -- a checker

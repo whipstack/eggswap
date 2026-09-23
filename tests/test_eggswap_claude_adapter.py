@@ -215,36 +215,6 @@ class AvailabilityTests(unittest.TestCase):
         for w in availability.windows:
             self.assertEqual(w.observed_at, availability.observed_at)
 
-    def test_model_query_ignores_unrelated_scoped_windows(self):
-        adapter = self._adapter()
-        profile = Profile(provider=Provider.CLAUDE, account_id="4")
-
-        sonnet = adapter.availability(profile, model="Sonnet")
-        self.assertIsInstance(sonnet, Available)
-        self.assertEqual(
-            {w.bucket for w in sonnet.windows}, {"fiveHour", "sevenDay"}
-        )
-
-        fable = adapter.availability(profile, model=" fAbLe ")
-        self.assertIsInstance(fable, Available)
-        self.assertEqual(
-            {w.bucket for w in fable.windows}, {"fiveHour", "sevenDay", "Fable"}
-        )
-
-    def test_exhausted_unrelated_model_does_not_exhaust_requested_model(self):
-        data = json.loads(FIXTURE_JSON)
-        account = next(a for a in data["accounts"] if a["number"] == 4)
-        account["usage"]["scoped"][0]["pct"] = 100.0
-        adapter = self._adapter(
-            _fake_result(json.dumps(data))
-        )
-        profile = Profile(provider=Provider.CLAUDE, account_id="4")
-
-        self.assertIsInstance(adapter.availability(profile, model="Sonnet"), Available)
-        fable = adapter.availability(profile, model="Fable")
-        self.assertIsInstance(fable, Exhausted)
-        self.assertEqual(fable.bucket, "Fable")
-
     def test_relogin_required_maps_to_auth_dead_not_the_frozen_numbers(self):
         adapter = self._adapter()
         for account_id in ("2", "3"):

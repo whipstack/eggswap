@@ -1,8 +1,8 @@
-"""eggswap lease ledger -- an exclusive hold for shared account state.
+"""eggswap lease ledger -- the primitive cswap Issue #581 lacks.
 
 WHY THIS MODULE EXISTS
 -----------------------
-Observed failure: two Claude CLIs sharing one HOME concurrently
+Measured incident (Issue #581): two Claude CLIs sharing one HOME concurrently
 rotate a single-use refresh token and destroy it (``invalid_grant`` / "Not
 logged in"). Holding an account must be an EXCLUSIVE, crash-recoverable act,
 not a hint two processes both believe.

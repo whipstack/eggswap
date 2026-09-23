@@ -1,7 +1,7 @@
 """Memory of which ROUTE just failed, and why -- so selection re-selects
-instead of replaying the same broken route.
+instead of replaying the same broken route (Issue #27, parent #773).
 
-THE OBSERVED FAILURE. A session repeatedly relaunched the identical
+THE MEASURED INCIDENT (#27). A session repeatedly relaunched the identical
 ``cswap run <account> ... --resume`` route after that exact route had already
 failed, with no new registered PID, while a replacement PID was logged as
 VERIFIED and the receiver reported idle. Nothing in the estate remembered

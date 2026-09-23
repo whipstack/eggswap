@@ -60,11 +60,6 @@ class ThreeFakeCodexHomesTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        preferences = mock.patch(
-            "eggswap.adapters.codex_home._managed_preferences", return_value={}
-        )
-        preferences.start()
-        self.addCleanup(preferences.stop)
 
         self.home_a = self.root / "acct-a"
         self.home_b = self.root / "acct-b"
@@ -295,20 +290,15 @@ class CredentialStoreModeTests(unittest.TestCase):
     accounts, and a tool that assumes otherwise will cheerfully "rotate"
     between two views of ONE account.
 
-    eggswap cannot prove an unmeasured keyring mapping, but it must not hide
-    that limit: managed settings are inspected, conflicts become "unknown",
-    and multi-home selection refuses an unverified store.
+    eggswap cannot fix that, but it must not hide it: the store mode is
+    measured per profile and reported, and "unknown" is never quietly upgraded
+    to "isolated".
     """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        preferences = mock.patch(
-            "eggswap.adapters.codex_home._managed_preferences", return_value={}
-        )
-        preferences.start()
-        self.addCleanup(preferences.stop)
 
     def _home(self, name, *, auth=None, config=None):
         home = self.root / name

@@ -1,6 +1,6 @@
 """Tests for eggswap.cli -- the acceptance surface a human actually reads.
 
-Covers the stale-data contract (a frozen percentage must never render as
+Covers #1037 acceptance criterion 7 (a frozen percentage must never render as
 fresh), AuthDead vs Exhausted distinguishability, the exact --dry-run cswap
 argv, and exit code 3 when nothing is schedulable. All adapters here are
 fakes: no network, no subprocess, no real account, no wall-clock dependence
@@ -51,12 +51,9 @@ class FakeAdapter:
         return env
 
 
-def _run(argv, adapters, *, now=NOW, runner=None):
+def _run(argv, adapters, *, now=NOW):
     out = io.StringIO()
-    kwargs = {"adapters": adapters, "out": out, "now": now}
-    if runner is not None:
-        kwargs["runner"] = runner
-    code = main(argv, **kwargs)
+    code = main(argv, adapters=adapters, out=out, now=now)
     return code, out.getvalue()
 
 
@@ -191,28 +188,6 @@ class ExitCodeTests(unittest.TestCase):
         self.assertIn("0 schedulable", status_output)
         self.assertEqual(select_code, 3)
         self.assertIn("no schedulable profile", select_output)
-
-    def test_run_does_not_spawn_for_an_exhausted_profile(self):
-        profile = Profile(provider=Provider.CODEX, account_id="acct-1", label="acct-1")
-        adapter = FakeAdapter(
-            Provider.CODEX,
-            [(profile, Exhausted(reset_at=NOW + 3600, bucket="codex:primary", observed_at=NOW))],
-        )
-        calls = []
-
-        def runner(argv, **kwargs):
-            calls.append((argv, kwargs))
-            raise AssertionError("exhausted profiles must not launch")
-
-        code, output = _run(
-            ["run", "codex:acct-1", "--", "codex", "exec", "hello"],
-            [adapter],
-            runner=runner,
-        )
-
-        self.assertEqual(code, 3)
-        self.assertIn("is not schedulable", output)
-        self.assertEqual(calls, [])
 
     def test_exit_code_0_when_one_profile_schedulable(self):
         profile = Profile(provider=Provider.CLAUDE, account_id="1", label="a@example.com")

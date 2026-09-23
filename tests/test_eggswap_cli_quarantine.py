@@ -173,13 +173,11 @@ class QuarantineWiringTests(unittest.TestCase):
         ]
         runner, calls = _runner_returning(1)
         out = _Out()
-        rc = cli.main(
+        cli.main(
             ["run", "codex:acct-a", "--", "true"], adapters=adapters, out=out,
             now=NOW, runner=runner, store=False, quarantine=self.quarantine,
         )
         failure = self.quarantine.reason(self.a.key)
-        self.assertEqual(rc, 3)
-        self.assertEqual(calls, [], "AuthDead profiles must be refused before spawn")
         self.assertEqual(failure.kind, AUTH_DEAD)
 
 

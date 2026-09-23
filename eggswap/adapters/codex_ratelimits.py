@@ -201,133 +201,107 @@ class AppServerRateLimitReader:
         result = reply.get("result")
         if not isinstance(result, dict):
             return Unknown(stale_since=observed_at, reason="missing result in account/rateLimits/read reply")
-        by_limit_id = result.get("rateLimitsByLimitId")
-        snapshots: list[tuple[str, dict]] = []
-        if by_limit_id is not None:
-            if not isinstance(by_limit_id, dict):
-                return Unknown(stale_since=observed_at, reason="malformed rateLimitsByLimitId")
-            for key, snapshot in by_limit_id.items():
-                if not isinstance(key, str) or not key or not isinstance(snapshot, dict):
-                    return Unknown(stale_since=observed_at, reason="malformed rateLimitsByLimitId entry")
-                snapshot_id = snapshot.get("limitId")
-                if snapshot_id is not None and snapshot_id != key:
-                    return Unknown(
-                        stale_since=observed_at,
-                        reason="rateLimitsByLimitId key does not match snapshot limitId",
-                    )
-                snapshots.append((key, snapshot))
+        rate_limits = result.get("rateLimits")
+        if not isinstance(rate_limits, dict):
+            return Unknown(stale_since=observed_at, reason="missing rateLimits in reply")
+        limit_id = rate_limits.get("limitId") or "codex"
 
-        # Older app-server versions and empty maps retain the backward-
-        # compatible single-snapshot response. No synthetic limit ID: if the
-        # provider gives neither a keyed map nor an actual limitId, capacity
-        # is unknown.
-        if not snapshots:
-            legacy = result.get("rateLimits")
-            if not isinstance(legacy, dict):
-                return Unknown(stale_since=observed_at, reason="missing rateLimits in reply")
-            limit_id = legacy.get("limitId")
-            if not isinstance(limit_id, str) or not limit_id:
-                return Unknown(stale_since=observed_at, reason="missing limitId in rateLimits")
-            snapshots = [(limit_id, legacy)]
+        primary = rate_limits.get("primary")
+        if not isinstance(primary, dict):
+            return Unknown(stale_since=observed_at, reason="missing primary window in rateLimits")
+        try:
+            windows = [
+                AppServerRateLimitReader._window(f"{limit_id}:primary", primary, observed_at=observed_at)
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
+            return Unknown(stale_since=observed_at, reason=f"malformed primary window: {exc}")
 
-        windows: list[QuotaWindow] = []
-        reached_types: list[tuple[str, str]] = []
-        for limit_id, rate_limits in snapshots:
-            for window_name in ("primary", "secondary"):
-                payload = rate_limits.get(window_name)
-                # Null means no populated bucket, not a fabricated zero.
-                if payload is None:
-                    continue
-                if not isinstance(payload, dict):
-                    return Unknown(
-                        stale_since=observed_at,
-                        reason=f"malformed {window_name} window in {limit_id}",
-                    )
-                try:
-                    windows.append(
-                        AppServerRateLimitReader._window(
-                            f"{limit_id}:{window_name}", payload, observed_at=observed_at
-                        )
-                    )
-                except (KeyError, TypeError, ValueError) as exc:
-                    return Unknown(
-                        stale_since=observed_at,
-                        reason=f"malformed {window_name} window in {limit_id}: {exc}",
-                    )
-
-            # rateLimitReachedType and spendControlReached are scoped to each
-            # snapshot; ordinaryUsageAllowed is a top-level response field.
-            reached_type = rate_limits.get("rateLimitReachedType")
-            if reached_type is None:
-                reached_type = result.get("rateLimitReachedType")
-            if reached_type is not None:
-                if not isinstance(reached_type, str):
-                    return Unknown(stale_since=observed_at, reason="malformed rateLimitReachedType")
-                reached_types.append((limit_id, reached_type))
-            spend_control = rate_limits.get("spendControlReached")
-            if spend_control is None:
-                spend_control = result.get("spendControlReached")
-            if spend_control is not None and not isinstance(spend_control, bool):
-                return Unknown(stale_since=observed_at, reason="malformed spendControlReached")
-            if spend_control is True:
-                return Unknown(
-                    stale_since=observed_at,
-                    reason="app-server usage gate reported; exhaustion semantics are unverified",
+        # `secondary` unpopulated means that account has one window, not a
+        # zero-usage second bucket -- an absent bucket and a bucket at 0%
+        # used are different facts (docs/research/eggswap/codex-ratelimits-live.md #5).
+        secondary = rate_limits.get("secondary")
+        if isinstance(secondary, dict):
+            try:
+                windows.append(
+                    AppServerRateLimitReader._window(f"{limit_id}:secondary", secondary, observed_at=observed_at)
                 )
+            except (KeyError, TypeError, ValueError) as exc:
+                return Unknown(stale_since=observed_at, reason=f"malformed secondary window: {exc}")
 
-        if not windows:
-            return Unknown(stale_since=observed_at, reason="no populated quota windows in reply")
-        ordinary_allowed = result.get("ordinaryUsageAllowed")
+        # The App Server contract says rateLimitReachedType is populated when
+        # the server has classified a reached limit. Its enum is not public,
+        # so retain the provider's value only as evidence and associate it
+        # with a bucket when it names one we observed. A 100% window is also
+        # direct quota evidence; never leave either case schedulable.
+        # NESTING MATTERS AND IT IS NOT UNIFORM. The live capture
+        # (docs/research/eggswap/codex-ratelimits-live.md section 2) puts
+        # ordinaryUsageAllowed at the TOP of `result`, but nests
+        # spendControlReached and rateLimitReachedType INSIDE
+        # `result.rateLimits`. Reading all three from `result` made two of
+        # these three gates unable to fire against any real reply -- present
+        # in the code, inert in production, which is the worst shape a guard
+        # can take: it reads as a defence in review and defends nothing.
+        # Both levels are consulted, rateLimits first, so a future top-level
+        # move does not silently re-break it.
+        def _gate(name):
+            # Prefer a MEANINGFUL value from either level rather than the
+            # first level that merely contains the key. The live reply carries
+            # rateLimitReachedType: null inside rateLimits, so a presence
+            # check there shadows a real value at the top of result -- the
+            # gate would read None and pass. Absent and null are the same
+            # "nothing said" here; a set value at either level is the signal.
+            nested = rate_limits.get(name)
+            if nested is not None:
+                return nested
+            return result.get(name)
+
+        reached_type = _gate("rateLimitReachedType")
+        if reached_type is not None and not isinstance(reached_type, str):
+            return Unknown(stale_since=observed_at, reason="malformed rateLimitReachedType")
+        ordinary_allowed = _gate("ordinaryUsageAllowed")
         if ordinary_allowed is not None and not isinstance(ordinary_allowed, bool):
             return Unknown(stale_since=observed_at, reason="malformed ordinaryUsageAllowed")
-        if ordinary_allowed is False:
+        spend_control = _gate("spendControlReached")
+        if spend_control is not None and not isinstance(spend_control, bool):
+            return Unknown(stale_since=observed_at, reason="malformed spendControlReached")
+
+        exhausted_window = next((window for window in windows if window.used_percent >= 100.0), None)
+        # The published contract does not define ordinaryUsageAllowed or
+        # spendControlReached semantics. A negative/positive value there is
+        # a measurement we cannot safely translate into quota exhaustion.
+        reached = bool(reached_type)
+        if exhausted_window is not None or reached:
+            window = exhausted_window
+            if reached_type:
+                named = next((w for w in windows if w.bucket.endswith(f":{reached_type}")), None)
+                if named is not None:
+                    window = named
+            return Exhausted(
+                reset_at=window.resets_at if window is not None else None,
+                bucket=window.bucket if window is not None else (str(reached_type) if reached_type else None),
+                observed_at=observed_at,
+            )
+
+        if ordinary_allowed is False or spend_control is True:
             return Unknown(
                 stale_since=observed_at,
                 reason="app-server usage gate reported; exhaustion semantics are unverified",
-            )
-
-        # This adapter represents a provider profile without model-to-bucket
-        # applicability. Treat any observed exhausted bucket conservatively;
-        # task-specific selection needs an explicit mapping before it can
-        # safely ignore a full bucket.
-        exhausted_window = next((window for window in windows if window.used_percent >= 100.0), None)
-        if exhausted_window is not None:
-            return Exhausted(
-                reset_at=exhausted_window.resets_at,
-                bucket=exhausted_window.bucket,
-                observed_at=observed_at,
-            )
-        if reached_types:
-            limit_id, reached_type = reached_types[0]
-            named = next((w for w in windows if w.bucket.startswith(f"{limit_id}:")), None)
-            return Exhausted(
-                reset_at=named.resets_at if named is not None else None,
-                bucket=named.bucket if named is not None else f"{limit_id}:{reached_type}",
-                observed_at=observed_at,
             )
 
         return Available(windows=windows, observed_at=observed_at)
 
     @staticmethod
     def _window(bucket: str, payload: dict, *, observed_at: float) -> QuotaWindow:
-        raw_used_percent = payload.get("usedPercent")
-        if isinstance(raw_used_percent, bool) or not isinstance(raw_used_percent, (int, float)):
-            raise ValueError("usedPercent is missing or not numeric")
-        raw_window_minutes = payload.get("windowDurationMins")
-        if isinstance(raw_window_minutes, bool) or not isinstance(raw_window_minutes, int):
-            raise ValueError("windowDurationMins is missing or not an integer")
+        used_percent = float(payload["usedPercent"])
+        window_minutes = payload["windowDurationMins"]
         resets_at = payload.get("resetsAt")
-        if resets_at is not None and (
-            isinstance(resets_at, bool) or not isinstance(resets_at, (int, float))
-        ):
-            raise ValueError("resetsAt is not numeric")
         return QuotaWindow(
             bucket=bucket,
-            used_percent=float(raw_used_percent),
+            used_percent=used_percent,
             # Measured live: windowDurationMins is MINUTES (10080 = 7 days);
             # QuotaWindow.window_seconds is SECONDS. Missing this multiplication
             # would under-report every window by 60x.
-            window_seconds=raw_window_minutes * 60,
+            window_seconds=int(window_minutes) * 60,
             resets_at=float(resets_at) if resets_at is not None else None,
             observed_at=observed_at,
             source=Source.OBSERVED,

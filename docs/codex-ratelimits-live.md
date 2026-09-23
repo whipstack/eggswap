@@ -200,37 +200,11 @@ polled. The adapter should also plan for `secondary` being legitimately
 not assume `secondary`, when present, means a shorter/5h window — that
 mapping remains unconfirmed.
 
-The adapter may **not** yet claim a confirmed live schema for a populated
-`secondary` (no account in reach of this probe had a non-null one), may not
-claim the `account/rateLimits/updated` notification arrived on this
-installation (it was not observed in the bounded session), and may not claim
-any additional `limitId` was observed live. The parser can preserve arbitrary
-IDs from the protocol's multi-bucket map, but this probe only observed
-`"codex"`.
-
-## 7. Upstream schema cross-check — source evidence, not a live probe
-
-On 2026-09-23 I checked the OpenAI Codex app-server protocol at commit
-[`876ce590e179ba8b4adbf5e64b9954a67f6f2fac`](https://github.com/openai/codex/tree/876ce590e179ba8b4adbf5e64b9954a67f6f2fac):
-
-- [`GetAccountRateLimitsResponse.ts`](https://github.com/openai/codex/blob/876ce590e179ba8b4adbf5e64b9954a67f6f2fac/codex-rs/app-server-protocol/schema/typescript/v2/GetAccountRateLimitsResponse.ts)
-  defines `rateLimitsByLimitId` as a nullable map keyed by metered `limit_id`,
-  alongside the backward-compatible `rateLimits` snapshot.
-- [`RateLimitSnapshot.ts`](https://github.com/openai/codex/blob/876ce590e179ba8b4adbf5e64b9954a67f6f2fac/codex-rs/app-server-protocol/schema/typescript/v2/RateLimitSnapshot.ts)
-  defines nullable `primary` and `secondary` windows and carries the bucket's
-  `limitId`, `normalModelSlug`, reached-limit type and spend-control status.
-- [`AccountRateLimitsUpdatedNotification.ts`](https://github.com/openai/codex/blob/876ce590e179ba8b4adbf5e64b9954a67f6f2fac/codex-rs/app-server-protocol/schema/typescript/v2/AccountRateLimitsUpdatedNotification.ts)
-  describes a sparse rolling update and instructs clients to merge available
-  values into the latest read snapshot or refetch it; nullable metadata in an
-  update does not clear a previously observed value.
-
-The reader now consumes every snapshot present in `rateLimitsByLimitId`,
-stamps each parsed window at reply arrival, and returns UNKNOWN for malformed
-entries or snapshots with no populated quota windows. It conservatively treats
-any exhausted returned bucket as exhausting this profile because Eggswap does
-not yet have a verified task-model-to-bucket mapping. This is schema-backed
-parser behavior, not proof that this installed account returned multiple
-buckets. The one-shot reader still exits after `rateLimits/read`; it does not
-maintain a live notification stream or merge `account/rateLimits/updated`.
-That event behavior remains NOT_RUN for this installation and requires a
-separately bounded live observation.
+The adapter may **not** yet claim a confirmed schema for `secondary`
+populated (no account in reach of this probe had a non-null one), may not
+claim `account/rateLimits/updated` exists or does not exist as a distinct
+push method (still UNKNOWN, only `account/updated` was confirmed live), and
+may not assume `limitId` values beyond the single observed `"codex"` (e.g.
+whether a Plus/Team/Enterprise plan surfaces additional `limitId` keys in
+`rateLimitsByLimitId`). Those remain gaps for a future bounded probe with a
+different account or a longer observation window.

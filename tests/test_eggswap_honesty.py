@@ -1,10 +1,10 @@
-"""Adversarial tests against eggswap's honesty claims.
+"""Adversarial tests against eggswap's honesty claims (whipstack #1037 / #773).
 
 Each test class attacks ONE claim eggswap's own docstrings make about itself
 and would FAIL if a future change silently weakened that claim. This file is
 not the implementation's test suite; it exists to catch a regression back
 into the specific incidents eggswap/core/types.py documents (the frozen
-negative cache, and stale-fence release of a replacement holder).
+negative cache, and the #581 stale-fence-releases-the-new-holder bug).
 """
 from __future__ import annotations
 
@@ -196,7 +196,7 @@ class ApiKeyProfilesOffByDefaultTest(unittest.TestCase):
 
 class StaleHolderCannotReleaseReplacementTest(unittest.TestCase):
     """Attack 5: "a stale holder cannot release its replacement's lease" --
-    reproduces a stale-fence bug found and fixed during development
+    reproduces the #581-adjacent bug this estate already found and fixed
     once: acquire, expire, reap, re-acquire, then release the ORIGINAL
     lease must raise StaleFence and must NOT drop the new holder's lease.
     """
@@ -250,13 +250,7 @@ class NoTokenLeavesTheAdapterTest(unittest.TestCase):
         self.home = home
 
     def test_canary_absent_from_profiles_and_availability(self):
-        # This test is about token redaction, not host policy discovery. Keep
-        # the credential-store source deterministic and avoid a macOS defaults
-        # subprocess in the suite's small-test lane.
-        adapter = CodexHomeAdapter(
-            [self.home], clock=lambda: 10.0,
-            store_mode_reader=lambda _home: "file",
-        )
+        adapter = CodexHomeAdapter([self.home], clock=lambda: 10.0)
         profiles = adapter.profiles()
         self.assertEqual(len(profiles), 1)
         profile = profiles[0]

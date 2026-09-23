@@ -6,7 +6,8 @@ WHY THIS MODULE EXISTS
 providers, falls back to the order the caller listed in
 ``Policy.allow_providers``. That fallback is documented there as a POLICY
 CHOICE, not a measurement -- a Claude 5h-window percentage and a Codex 7d
-bucket percentage are different units, and averaging them would be a lie.
+bucket percentage are different units, and averaging them would be a lie
+(#773 slice 4, shipped PARTIAL).
 
 This module makes the richer choices available WITHOUT hiding an
 apples-to-oranges comparison behind a single number. Each
