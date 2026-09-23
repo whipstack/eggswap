@@ -104,13 +104,17 @@ class TestStandaloneCiAndEvidence(unittest.TestCase):
         self.assertIn("contents: read", text)
 
     def test_portable_codex_evidence_is_present_without_internal_notes(self) -> None:
-        project_root = EGGSWAP_DIR.parent if EGGSWAP_DIR.name == "eggswap" else EGGSWAP_DIR
+        # The standalone repository itself is named ``eggswap`` too. Check
+        # whether EGGSWAP_DIR is the import package, rather than inferring its
+        # role from the directory name alone.
+        in_tree_package = (EGGSWAP_DIR / "__init__.py").is_file()
+        project_root = EGGSWAP_DIR.parent if in_tree_package else EGGSWAP_DIR
         evidence_dir = project_root / "docs/research/eggswap"
         self.assertTrue((evidence_dir / "codex-account-model.md").is_file())
         self.assertTrue((evidence_dir / "codex-ratelimits-live.md").is_file())
         readme = (EGGSWAP_DIR / "README.md").read_text(encoding="utf-8")
         self.assertIn("codex-ratelimits-live.md", readme)
-        if EGGSWAP_DIR.name != "eggswap":
+        if not in_tree_package:
             self.assertEqual(
                 {path.name for path in evidence_dir.glob("*.md")},
                 {"codex-account-model.md", "codex-ratelimits-live.md"},
