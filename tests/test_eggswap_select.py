@@ -130,3 +130,54 @@ class RankSelectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TieBreakersTests(unittest.TestCase):
+    """Secondary preferences must never fold into the primary score.
+
+    Design adopted from a parallel lane (ed00db90de) that reached it
+    independently. The point is narrow and load-bearing: a caller often has a
+    real secondary preference -- fewest jobs already running, furthest reset
+    -- and the tempting shortcut is to blend it into `score`. That blend is
+    exactly the fabricated single number this module refuses everywhere else,
+    because once two unlike measurements are averaged nobody can say what the
+    result means. So they ride alongside, and only break ties.
+    """
+
+    NOW = 1_000_000.0
+
+    def _c(self, account_id, score, *tie_breakers):
+        return Candidate(
+            Profile(Provider.CLAUDE, account_id),
+            Available(observed_at=self.NOW),
+            score=score,
+            tie_breakers=tie_breakers,
+        )
+
+    def test_tie_breakers_order_equal_scores_highest_first(self):
+        ranked = rank(
+            [self._c("a", 50.0, 1.0), self._c("b", 50.0, 9.0), self._c("c", 50.0, 5.0)],
+            Policy(), now=self.NOW,
+        )
+        self.assertEqual([c.profile.account_id for c in ranked], ["b", "c", "a"])
+
+    def test_the_primary_score_still_dominates(self):
+        """Negative control: a tie-break must not become a back door."""
+        ranked = rank(
+            [self._c("low", 10.0, 99.0), self._c("high", 90.0, 0.0)],
+            Policy(), now=self.NOW,
+        )
+        self.assertEqual(ranked[0].profile.account_id, "high")
+
+    def test_absent_tie_breakers_stay_deterministic(self):
+        ranked = rank(
+            [self._c("z", 50.0), self._c("a", 50.0)], Policy(), now=self.NOW
+        )
+        self.assertEqual([c.profile.account_id for c in ranked], ["a", "z"])
+
+    def test_a_shorter_tuple_does_not_crash_against_a_longer_one(self):
+        ranked = rank(
+            [self._c("one", 50.0, 5.0), self._c("two", 50.0, 5.0, 7.0)],
+            Policy(), now=self.NOW,
+        )
+        self.assertEqual({c.profile.account_id for c in ranked}, {"one", "two"})

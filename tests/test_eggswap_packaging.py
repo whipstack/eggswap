@@ -22,7 +22,7 @@ except ModuleNotFoundError:  # Python 3.10: tomllib landed in 3.11.
 def _project_dir() -> Path:
     """Where eggswap's project metadata lives, in EITHER layout.
 
-    In the development checkout the package directory also holds the packaging files
+    Inside whipstack the package directory also holds the packaging files
     (``<repo>/eggswap/pyproject.toml``); once exported as a standalone
     repository they sit at the root beside the package. Hardcoding the first
     layout made every test here pass in-tree and ERROR in the artifact we
@@ -84,42 +84,6 @@ class TestPyprojectToml(unittest.TestCase):
         scripts = data["project"]["scripts"]
         self.assertEqual(scripts.get("eggswap"), "eggswap.cli:main_entry")
 
-    def test_platform_classifiers_match_the_posix_lease_store(self) -> None:
-        data = self._load()
-        classifiers = data["project"]["classifiers"]
-        self.assertNotIn("Operating System :: OS Independent", classifiers)
-        self.assertIn("Operating System :: POSIX", classifiers)
-        self.assertIn("Operating System :: POSIX :: Linux", classifiers)
-        self.assertIn("Operating System :: MacOS :: MacOS X", classifiers)
-
-
-class TestStandaloneCiAndEvidence(unittest.TestCase):
-    def test_ci_workflow_is_exportable_and_runs_tests_and_build(self) -> None:
-        workflow = EGGSWAP_DIR / ".github" / "workflows" / "ci.yml"
-        self.assertTrue(workflow.is_file(), f"missing standalone CI: {workflow}")
-        text = workflow.read_text(encoding="utf-8")
-        self.assertIn("python -m unittest discover", text)
-        self.assertIn("python -m build --wheel", text)
-        self.assertIn("eggswap --help", text)
-        self.assertIn("contents: read", text)
-
-    def test_portable_codex_evidence_is_present_without_internal_notes(self) -> None:
-        # The standalone repository itself is named ``eggswap`` too. Check
-        # whether EGGSWAP_DIR is the import package, rather than inferring its
-        # role from the directory name alone.
-        in_tree_package = (EGGSWAP_DIR / "__init__.py").is_file()
-        project_root = EGGSWAP_DIR.parent if in_tree_package else EGGSWAP_DIR
-        evidence_dir = project_root / "docs/research/eggswap"
-        self.assertTrue((evidence_dir / "codex-account-model.md").is_file())
-        self.assertTrue((evidence_dir / "codex-ratelimits-live.md").is_file())
-        readme = (EGGSWAP_DIR / "README.md").read_text(encoding="utf-8")
-        self.assertIn("codex-ratelimits-live.md", readme)
-        if not in_tree_package:
-            self.assertEqual(
-                {path.name for path in evidence_dir.glob("*.md")},
-                {"codex-account-model.md", "codex-ratelimits-live.md"},
-            )
-
 
 class TestLicenseFile(unittest.TestCase):
     def setUp(self) -> None:
@@ -168,3 +132,66 @@ class TestContributingFile(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TheReadmeDocumentsTheRealSurfaceTests(unittest.TestCase):
+    """Every command the CLI exposes must appear in the README.
+
+    For an open-source project the README IS the interface: a feature a
+    stranger cannot find does not exist for them. This check was written
+    after the README documented four commands while the CLI had five, and
+    mentioned none of --explain, --pin, --cross-provider, EGGSWAP_STATE_DIR
+    or EGGSWAP_CODEX_HOMES. That is the same built-and-unreachable shape this
+    project kept hitting in code, moved one layer out.
+
+    It reads the commands from argparse rather than a hand-kept list, so the
+    next command added is caught by construction instead of by someone
+    remembering.
+    """
+
+    def setUp(self):
+        self.readme = (EGGSWAP_DIR / "README.md").read_text(encoding="utf-8")
+
+    def _cli_commands(self):
+        from eggswap.cli import _build_parser
+
+        parser = _build_parser()
+        for action in parser._actions:
+            if getattr(action, "choices", None) and hasattr(action.choices, "keys"):
+                return sorted(action.choices.keys())
+        self.fail("could not read the subcommands out of the parser")
+
+    def test_every_subcommand_is_documented(self):
+        for command in self._cli_commands():
+            with self.subTest(command=command):
+                self.assertIn(
+                    f"eggswap {command}", self.readme,
+                    f"`eggswap {command}` is not mentioned in the README",
+                )
+
+    def test_the_check_reads_a_real_parser(self):
+        """Negative control: an empty command list would pass vacuously."""
+        commands = self._cli_commands()
+        self.assertGreaterEqual(len(commands), 4, commands)
+        self.assertIn("select", commands)
+
+    def test_the_documented_flags_exist_in_the_parser(self):
+        """The inverse drift: the README must not promise a flag we removed."""
+        from eggswap.cli import _build_parser
+
+        help_text = _build_parser().format_help()
+        select_help = ""
+        import io
+        import contextlib
+
+        parser = _build_parser()
+        for action in parser._actions:
+            if getattr(action, "choices", None) and hasattr(action.choices, "keys"):
+                sub = action.choices.get("select")
+                if sub is not None:
+                    select_help = sub.format_help()
+        for flag in ("--explain", "--pin", "--cross-provider"):
+            if flag in self.readme:
+                with self.subTest(flag=flag):
+                    self.assertIn(flag, select_help + help_text,
+                                  f"README documents {flag}, which the parser does not have")

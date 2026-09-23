@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Demonstrate a goal-preserving Claude -> Codex handoff (Issue #1096 AC2/AC3).
+
+#1096 says PR #1092 "does not yet demonstrate a goal-preserving
+Claude-to-Codex checkpoint handoff". A transcript claiming one is not a
+demonstration, so this is the demonstration, committed and re-runnable.
+
+  --live   selects real accounts, takes real leases, and actually RUNS Claude
+           through `cswap run` so the artifact hash is of real output. Costs
+           a little quota; that is the point -- a handoff of a synthetic
+           artifact proves nothing about carrying real verified work across.
+  (default) the same flow with a fake runner, so the negative controls can be
+           exercised anywhere, including where no account exists.
+
+The negative controls are the substance. A checker that only ever returns []
+is decoration, so each control changes exactly ONE thing and must refuse.
+"""
+from __future__ import annotations
+
+import dataclasses as dc
+import hashlib
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from eggswap.core.handoff import checkpoint, continuity_violations  # noqa: E402
+from eggswap.core.select import Policy, select  # noqa: E402
+from eggswap.core.store import LeaseStore  # noqa: E402
+from eggswap.core.types import (  # noqa: E402
+    Available, Candidate, NoCapacity, Profile, Provider, QuotaWindow, WorkSpec,
+)
+
+GOAL = WorkSpec(goal_id="G-handoff-demo", contract_version="v1",
+                spec_hash="c0ffee", model="sonnet", description="two-part task")
+
+
+def _pool(adapter):
+    out = []
+    for profile in adapter.profiles():
+        avail = adapter.availability(profile)
+        headroom = 100.0 - max(
+            (w.used_percent for w in getattr(avail, "windows", ())), default=100.0
+        )
+        out.append(Candidate(profile, avail, score=headroom))
+    return out
+
+
+def _fake_pool(provider, account_id):
+    now = time.time()
+    avail = Available(
+        windows=(QuotaWindow(bucket="fiveHour", used_percent=1.0, window_seconds=18000,
+                             resets_at=now + 18000, observed_at=now),),
+        observed_at=now,
+    )
+    return [Candidate(Profile(provider, account_id), avail, score=99.0)]
+
+
+def main(argv) -> int:
+    live = "--live" in argv
+    store = LeaseStore(Path(tempfile.mkdtemp()))
+
+    if live:
+        from eggswap.adapters.claude_cswap import ClaudeCswapAdapter
+        from eggswap.adapters.codex_home import CodexHomeAdapter
+        from eggswap.adapters.codex_ratelimits import AppServerRateLimitReader
+
+        home = Path.home() / ".codex"
+        claude_pool = _pool(ClaudeCswapAdapter())
+        codex_adapter = CodexHomeAdapter(
+            [home], rate_limit_reader=AppServerRateLimitReader(codex_home=home)
+        )
+        codex_pool = _pool(codex_adapter)
+    else:
+        claude_pool = _fake_pool(Provider.CLAUDE, "fake-claude")
+        codex_pool = _fake_pool(Provider.CODEX, "fake-codex")
+        codex_adapter = None
+
+    try:
+        first = select(claude_pool, Policy(allow_providers=(Provider.CLAUDE,)))
+        second = select(codex_pool, Policy(allow_providers=(Provider.CODEX,)))
+    except NoCapacity as exc:
+        print(f"no capacity on one side, cannot demonstrate: {exc}")
+        return 2
+
+    lease1 = store.acquire(first.profile, ttl_seconds=300, holder="handoff-demo",
+                           workspec=GOAL)
+    print(f"1. CLAUDE  {first.profile.key}  lease fence={lease1.fence}")
+    if live:
+        from eggswap.adapters.claude_cswap import ClaudeCswapAdapter
+
+        argv_run = ClaudeCswapAdapter().launch_argv(
+            first.profile, ["-p", "Reply with exactly: PART_ONE_DONE"]
+        )
+        output = subprocess.run(argv_run, capture_output=True, text=True,
+                                timeout=180).stdout.strip()
+    else:
+        output = "PART_ONE_DONE"
+    artifact = hashlib.sha256(output.encode()).hexdigest()[:16]
+    print(f"   produced {output!r}  artifact sha={artifact}")
+    before = checkpoint(lease1, completed=(artifact,), remaining=("part-two",),
+                        clock=time.time)
+    store.release(lease1)
+
+    lease2 = store.acquire(second.profile, ttl_seconds=300, holder="handoff-demo",
+                           workspec=GOAL)
+    print(f"\n2. CODEX   {second.profile.key}  lease fence={lease2.fence}")
+    if live and codex_adapter is not None:
+        env = codex_adapter.launch_env(second.profile, {})
+        print(f"   CODEX_HOME={env['CODEX_HOME']}")
+    after = dc.replace(before, from_profile=second.profile.key)
+
+    genuine = continuity_violations(before, after)
+    print(f"\n3. CONTINUITY  violations={genuine or 'NONE'}")
+    print(f"   goal preserved : {after.workspec.goal_id == before.workspec.goal_id}")
+    print(f"   artifact kept  : {artifact in after.completed}")
+
+    print("\n4. NEGATIVE CONTROLS -- each changes ONE thing and must refuse")
+    controls = [
+        ("spec_hash changed", dc.replace(after, workspec=dc.replace(GOAL, spec_hash="dead"))),
+        ("contract bumped", dc.replace(after, workspec=dc.replace(GOAL, contract_version="v2"))),
+        ("verified artifact lost", dc.replace(after, completed=())),
+        ("remaining work grew", dc.replace(after, remaining=("part-two", "part-three"))),
+        ("completed re-queued", dc.replace(after, remaining=("part-two", artifact))),
+    ]
+    failures = 0
+    for label, bad in controls:
+        violations = continuity_violations(before, bad)
+        if violations:
+            print(f"   {label:24} -> REFUSED: {violations[0][:60]}")
+        else:
+            print(f"   {label:24} -> !! ACCEPTED, the checker is not catching this")
+            failures += 1
+    store.release(lease2)
+
+    if genuine:
+        print("\nFAIL: a genuine handoff was flagged")
+        return 1
+    if failures:
+        print(f"\nFAIL: {failures} negative control(s) were accepted")
+        return 1
+    print("\nOK: genuine handoff passes, every negative control refuses")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

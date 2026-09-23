@@ -4,7 +4,7 @@ WHY THIS MODULE EXISTS
 ----------------------
 Two measured incidents in this estate define every honesty rule below.
 
-1. A frozen negative cache.
+1. The frozen negative cache (docs/research/2026-08-05-negative-cache-bug.md).
    A dead account's quota percentages froze at their last good values and kept
    rendering as if fresh. Four workers were dispatched onto an account that had
    been dead for hours and died on ``authentication_failed``. The lesson is not
@@ -12,7 +12,7 @@ Two measured incidents in this estate define every honesty rule below.
    fact: a percentage without its observation time is not data, and a read that
    FAILED is not a read that returned zero.
 
-2. Shared-credential corruption. Two Claude CLIs on one
+2. The shared-credential corruption (Issue #581). Two Claude CLIs on one
    HOME concurrently rotate a single-use refresh token and destroy it
    (``invalid_grant`` / "Not logged in"). So holding an account is an
    EXCLUSIVE act with a fence, not a hint.
@@ -73,7 +73,7 @@ class Provider(enum.Enum):
     """Which vendor an account belongs to.
 
     Provider is an ATTRIBUTE of a profile, never a branch baked into a call
-   site. Consumers must be able to ask "which account, of
+    site. Issue #773 part 3: consumers must be able to ask "which account, of
     any provider, should take this unit of work".
     """
 
@@ -128,8 +128,9 @@ class QuotaWindow:
     def render(self, max_age_seconds: float, *, now: Optional[float] = None) -> str:
         """Human rendering that CANNOT show a stale number as a fresh one.
 
-        This encodes the negative-cache lesson: rendering a frozen percentage
-        as fresh is a failing test.
+        This is the negative-cache incident encoded as a method. #1037
+        acceptance criterion 7: "a frozen percentage rendering as fresh is a
+        failing test".
         """
         age = self.age_seconds(now=now)
         if self.is_stale(max_age_seconds, now=now):
@@ -168,8 +169,9 @@ class AuthDead:
     """The credential is gone and only the human can restore it.
 
     Distinct from Exhausted on purpose: exhaustion heals with time, a revoked
-    refresh token heals only through the vendor's own login flow. The
-    scheduler must not promise recovery it cannot perform.
+    refresh token heals only through the vendor's own login flow. Promising
+    autonomous recovery of access the system no longer has is a lie
+    (#1037 acceptance criterion 4).
     """
 
     reason: str = ""
@@ -207,7 +209,7 @@ class Unknown:
     def schedulable(self) -> bool:
         # An account whose capacity cannot be read is not the same as an
         # account with capacity. Conflating them schedules work onto a wall
-        # The account cannot be scheduled without a fresh capacity reading.
+        # (#773 invariant 3).
         return False
 
 
@@ -227,7 +229,7 @@ class Profile:
     account_id: str
     label: str = ""
     #: API-key profiles are OFF by default and never auto-selected without an
-    #: explicit opt-in AND a budget.
+    #: explicit opt-in AND a budget (#1037 acceptance criterion 9).
     is_api_key: bool = False
     enabled: bool = True
     metadata: Mapping[str, str] = field(default_factory=dict)
@@ -257,11 +259,14 @@ class Candidate:
     availability: Availability
     score: float = 0.0
     rationale: str = ""
-    #: Optional secondary scores, ordered from most to least important.
-    #: Higher values win after `score` ties; provider-neutral callers can
-    #: preserve a documented tie-break without folding unlike measurements
-    #: into one fabricated quota number.
-    tie_breakers: tuple[float, ...] = ()
+    #: Optional secondary scores, most important first. Applied only AFTER
+    #: `score` ties, highest wins. This exists so a caller can keep a
+    #: documented secondary preference -- fewest running, furthest reset --
+    #: without folding unlike measurements into one fabricated quota number,
+    #: which is the lie this whole module is built to refuse. Design adopted
+    #: from the fix/eggswap-release-ci-latest lane (ed00db90de), which
+    #: arrived at it independently.
+    tie_breakers: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -281,8 +286,8 @@ class Lease:
 
     ``fence`` is a monotonically increasing generation per profile. A holder
     that wakes up after its lease expired and was re-granted carries an older
-    fence and MUST be refused at settle time, or it could release its
-    replacement's hold after waking late.
+    fence and MUST be refused at settle time -- otherwise the #581 failure
+    (two CLIs, one rotating refresh token) returns through the back door.
     """
 
     lease_id: str

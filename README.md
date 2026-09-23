@@ -28,12 +28,17 @@ config. On a keyring-backed install the credential does not live under
 eggswap measures the store per profile and reports it in the profile's
 metadata rather than assuming isolation: a home whose `auth.json` carries no
 tokens reads as `unknown`, never as `file`, even if the config claims
-otherwise. It checks user config, system managed settings and macOS MDM
-requirements; unreadable or conflicting settings also read as `unknown`. In a
-multi-home setup, any non-file-backed or unknown profile is unschedulable.
-Whether a keyring entry is namespaced per `CODEX_HOME` is **untested**. A
-single keyring-backed profile can still use its capacity reader, but do not
-assume multiple such homes are separate accounts until isolation is verified.
+otherwise.
+
+And the keyring case looks actively risky rather than merely untested. The
+keyring **service** name in the shipped binary is the constant `"codex"`, with
+no per-`CODEX_HOME` component; the **account** half of the pair is built at
+runtime and cannot be read from the binary. If it too is constant, two
+`CODEX_HOME` directories share one secret, and rotating between them would
+hammer a single account's quota while appearing to use two. **If you run
+multiple Codex accounts on a keyring-backed install, verify isolation
+yourself before trusting rotation** — `docs/codex-keyring-namespacing.md`
+spells out the two-test-login experiment that settles it.
 
 **The two providers are not at parity today.** The Claude side reads every
 account `cswap` knows about, with 5h/7d and any scoped windows, from one
@@ -69,9 +74,6 @@ pip install -e .
 Requires Python >= 3.10. Zero runtime dependencies — everything eggswap
 does at runtime is Python's standard library.
 
-Supported operating systems are macOS and Linux. The cross-process account
-lease uses POSIX `fcntl.flock`; Windows is not supported yet.
-
 ## Commands
 
 ```
@@ -79,6 +81,56 @@ eggswap list      # every profile, both providers, with honest availability
 eggswap status    # one-line summary of which profiles are schedulable
 eggswap select    # print the chosen profile for the next unit of work; does not launch it
 eggswap run       # bind a process to the selected profile's account and launch it
+eggswap clear     # release a quarantine by hand after fixing what caused it
+```
+
+### Asking why
+
+`select` will tell you what it decided and, more usefully, what it refused:
+
+```
+$ eggswap select --explain
+claude:1 chosen: most_headroom score 94 beats 71
+  refused claude:2: AuthDead: cswap usageStatus=relogin_required
+  refused claude:3: AuthDead: cswap usageStatus=relogin_required
+  refused claude:6: Unknown(stale 413s, stale usage)
+```
+
+`--explain --json` returns the same as a record, with every profile
+considered and every refusal reasoned. A scheduler that cannot say why it
+chose an account cannot be audited after a bad choice.
+
+### Demanding one account
+
+```
+eggswap select --pin claude:4
+```
+
+If that profile is not eligible the command **refuses** and exits 3 rather
+than quietly returning a healthy sibling. A pin that degrades into a
+preference is worse than no pin, because you believe it was honoured.
+
+### Choosing how to order across providers
+
+```
+eggswap select --cross-provider longest_until_reset
+```
+
+`provider_order` (the default), `most_absolute_headroom`,
+`longest_until_reset`, `spread`. The default is a **policy choice, not a
+measurement** — a Claude 5h percentage and a Codex 7d bucket are different
+units, and `most_absolute_headroom` will refuse to compare unlike windows
+rather than average them into a number that means nothing.
+
+### Environment
+
+| variable | effect |
+|---|---|
+| `EGGSWAP_CODEX_HOMES` | `os.pathsep`-separated `CODEX_HOME` directories, for multiple Codex accounts. Explicit list wins over `CODEX_HOME` and over the `~/.codex` default. |
+| `EGGSWAP_STATE_DIR` | where leases and quarantines live. Defaults to `~/.local/state/eggswap` — outside any repository and outside any provider's config directory, because a lease outlives a checkout. |
+| `CODEX_HOME` | the single Codex home this shell is already bound to. |
+| `EGGSWAP_SELECTOR` | consumed by the whipstack integration, not by this CLI. |
+```
 ```
 
 `select` and `run` are deliberately separate: selecting a candidate never
@@ -94,6 +146,11 @@ against a held account refuses with exit code 10 and names the holder rather
 than starting a second process. An expired hold is reaped automatically, so a
 crashed run does not fence an account off until someone deletes a lock file
 by hand. `status` lists held accounts separately from schedulable ones.
+
+This was wired late: an audit of this very README found that the guarantee
+was described here and never taken in the CLI, which is recorded in
+`docs/readme-honesty-audit.md` along with everything else that audit
+graded MISLEADING.
 
 ## Non-goals
 
@@ -115,17 +172,17 @@ eggswap explicitly does **not**:
 the account's own session state and rendered with the honesty contract
 above.
 
-**Codex capacity is implemented, with one live account observation.** The
-adapter starts a private `codex app-server` child in the selected profile's
-`CODEX_HOME`, reads `account/rateLimits/read`, and stamps the response at
-arrival because the response has no capture-time field. One live read on
-codex-cli 0.156.1 observed the `codex:primary` window; the redacted transcript
-and field-level limits are in
-[`docs/research/eggswap/codex-ratelimits-live.md`](docs/research/eggswap/codex-ratelimits-live.md). That
-single sample is evidence for the reader's schema, not current capacity or
-proof of multiple-account isolation. The populated `secondary` bucket,
-additional `limitId` values, and a distinct `account/rateLimits/updated`
-push remain unverified. Missing or stale readings stay `Unknown`.
+**Codex does not have a live capacity signal yet.** A bounded static probe
+(`docs/codex-ratelimits-probe.md`) confirmed the installed
+`codex` binary supports an `account/rateLimits/read` JSON-RPC method and
+recovered the *names* of its response fields (`RateLimitSnapshot`,
+`RateLimitWindow`, etc.) from the binary's string table — but no live call
+was made, so there is no observed `usedPercent`, window, or reset time from
+a real response, only evidence that the fields exist in the shipped
+protocol. Until that live call is made and wired in, eggswap reports Codex
+profiles as `Unknown` rather than implying it has read their quota. Treat
+any current display of Codex capacity as provenance-labeled speculation, not
+parity with the Claude side.
 
 ## License
 

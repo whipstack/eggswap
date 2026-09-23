@@ -165,6 +165,41 @@ class ClaudeCswapAdapter:
         max_age_seconds: float = 300.0,
         model: Optional[str] = None,
     ) -> Availability:
+        """Availability of one account, optionally FOR A SPECIFIC MODEL.
+
+        cswap reports account-wide windows (fiveHour, sevenDay) plus per-model
+        `scoped` buckets. Those are not interchangeable and a code review
+        caught this adapter treating them as if they were: every scoped bucket
+        was folded into one profile-wide verdict, so an account with
+        Fable at 100% and healthy 5h/7d came back Exhausted -- and would have
+        been refused for `--model Sonnet`, which it can serve perfectly well.
+        The inverse was as bad: a high-but-not-exhausted bucket for an
+        unrelated model depressed that account's ranking for every model.
+
+        So the rule is: account-wide windows always bind. A scoped bucket
+        binds only when it is the REQUESTED model's bucket. Every bucket is
+        still reported in `windows` -- a human running `eggswap list` wants to
+        see them -- but visibility and bindingness are different things, and
+        conflating them is what caused the defect.
+
+        ONE DELIBERATE DIVERGENCE, recorded because a parallel lane
+        (fix/eggswap-release-ci-latest, ed00db90de) reached the same design
+        independently and chose the opposite on this single case. With NO
+        model requested, that lane lets every scoped bucket bind, "to keep the
+        complete view for diagnostics". Here no scoped bucket binds.
+
+        The reason is what Exhausted MEANS: it sets `.schedulable = False`, so
+        it is a scheduling verdict, not a display. An account whose Fable
+        bucket is walled can still serve Sonnet, and calling it unschedulable
+        would refuse work it can do -- the same class of error as the defect
+        above, merely pointed at the no-model case. The complete view is not
+        lost either way, because every bucket is still in `windows` and
+        `eggswap list` prints all of them.
+
+        The cost of this choice, stated so nobody is surprised: `select()`
+        with no model named can return an account whose unnamed model is
+        walled. That is the caller's omission, and naming the model fixes it.
+        """
         now = self._clock()
         accounts = self._list_accounts()
         if accounts is None:
@@ -203,7 +238,7 @@ class ClaudeCswapAdapter:
         exhausted_bucket = None
         exhausted_reset_at = None
 
-        def _consider(bucket_name: str, bucket: Optional[dict]) -> None:
+        def _consider(bucket_name: str, bucket: Optional[dict], *, binding: bool) -> None:
             nonlocal exhausted_bucket, exhausted_reset_at
             if not isinstance(bucket, dict) or "pct" not in bucket:
                 return
@@ -218,23 +253,21 @@ class ClaudeCswapAdapter:
                     observed_at=fetched_at,
                 )
             )
-            if pct >= 100.0 and exhausted_bucket is None:
+            if pct >= 100.0 and binding and exhausted_bucket is None:
                 exhausted_bucket = bucket_name
                 exhausted_reset_at = reset_at
 
-        _consider("fiveHour", usage.get("fiveHour"))
-        _consider("sevenDay", usage.get("sevenDay"))
-        requested_model = model.strip().casefold() if model is not None else None
+        _consider("fiveHour", usage.get("fiveHour"), binding=True)
+        _consider("sevenDay", usage.get("sevenDay"), binding=True)
+        wanted = (model or "").strip().casefold()
         for scoped in usage.get("scoped") or []:
             name = scoped.get("name") if isinstance(scoped, dict) else None
-            # Model-aware callers must not let another model's bucket change
-            # this account's eligibility or ranking. Unscoped inventory calls
-            # keep the complete view for diagnostics and `eggswap list`.
-            if name and (
-                requested_model is None
-                or str(name).strip().casefold() == requested_model
-            ):
-                _consider(name, scoped)
+            if not name:
+                continue
+            # Binding only when this IS the requested model's bucket. With no
+            # model asked for, no scoped bucket binds: the account is usable
+            # for whatever model the caller has not named yet.
+            _consider(name, scoped, binding=bool(wanted) and name.strip().casefold() == wanted)
 
         if exhausted_bucket is not None:
             return Exhausted(

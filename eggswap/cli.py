@@ -336,16 +336,51 @@ def _cmd_status(adapters, policy: Policy, out, *, now: float, store=None, quaran
     return 0 if schedulable else 3
 
 
-def _cmd_select(adapters, policy: Policy, out, *, now: float, as_json: bool, store=None, quarantine=None) -> int:
+def _cmd_select(adapters, policy: Policy, out, *, now: float, as_json: bool, store=None, quarantine=None, explain: bool = False) -> int:
     candidates = _build_candidates(adapters, now=now, max_age_seconds=policy.max_age_seconds)
     held = _held_keys(store, [c.profile for c in candidates], now=now)
     candidates = [c for c in candidates if c.profile.key not in held]
     if quarantine is not None:
         candidates = quarantine.filter(candidates)
+    if explain:
+        # The audit path. eggswap/core/decision.py records WHY a profile was
+        # chosen and, more usefully, why each other one was refused -- and it
+        # was reachable from nothing, which is the built-and-unwired shape
+        # this project has already been caught in twice (the lease, then the
+        # quarantine). A record a human cannot reach audits nothing.
+        from eggswap.core.decision import decide
+
+        record = decide(candidates, policy, now=now)
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "profile": record.chosen.profile.key if record.chosen else None,
+                        "rationale": record.rationale,
+                        "considered": list(record.considered),
+                        "refused": [
+                            {"profile": r.profile_key, "reason": r.reason}
+                            for r in record.refused
+                        ],
+                        "policy": dict(record.policy_summary),
+                    },
+                    indent=2,
+                ),
+                file=out,
+            )
+        else:
+            print(record.rationale, file=out)
+            for refusal in record.refused:
+                print(f"  refused {refusal.profile_key}: {refusal.reason}", file=out)
+        return 0 if record.chosen is not None else 3
+
     try:
         chosen = select_candidate(candidates, policy, now=now)
     except NoCapacity as exc:
-        print(f"no schedulable profile: {exc}", file=out)
+        # NoCapacity already renders its own "no schedulable profile: ..."
+        # preamble with the per-profile reasons; prefixing it again produced
+        # "no schedulable profile: no schedulable profile: claude:2=AuthDead".
+        print(str(exc), file=out)
         return 3
     if as_json:
         print(
@@ -361,31 +396,6 @@ def _cmd_select(adapters, policy: Policy, out, *, now: float, as_json: bool, sto
     else:
         print(chosen.profile.key, file=out)
     return 0
-
-
-def _candidate_eligible(profile: Profile, availability, *, now: float) -> bool:
-    candidate = Candidate(
-        profile=profile,
-        availability=availability,
-        score=_score(availability),
-    )
-    try:
-        select_candidate([candidate], Policy(), now=now)
-    except NoCapacity:
-        return False
-    return True
-
-
-def _run_refusal(profile: Profile, availability, *, now: float) -> str:
-    detail = _render_availability(
-        availability, max_age_seconds=DEFAULT_MAX_AGE_SECONDS, now=now
-    )
-    if isinstance(availability, Available) and (
-        availability.observed_at <= 0
-        or now - availability.observed_at > DEFAULT_MAX_AGE_SECONDS
-    ):
-        return f"eggswap run: {profile.key} is not schedulable: UNKNOWN (capacity observation is stale)"
-    return f"eggswap run: {profile.key} is not schedulable: {detail}"
 
 
 def _find_profile(adapters, profile_key: str):
@@ -420,16 +430,6 @@ def _settle_quarantine(
         save_quarantine(quarantine, quarantine_path)
 
 
-def _record_auth_dead(quarantine, quarantine_path, profile) -> None:
-    if quarantine is None:
-        return
-    quarantine.record(
-        profile.key, AUTH_DEAD, detail="adapter reported AuthDead before launch"
-    )
-    if quarantine_path is not None:
-        save_quarantine(quarantine, quarantine_path)
-
-
 def _cmd_run(
     rest: List[str],
     adapters,
@@ -440,7 +440,6 @@ def _cmd_run(
     ttl_seconds: float = 3600.0,
     quarantine=None,
     quarantine_path: Optional[Path] = None,
-    now: float,
 ) -> int:
     tokens = list(rest)
     dry_run = False
@@ -466,12 +465,6 @@ def _cmd_run(
             pre_launch_auth_dead = isinstance(adapter.availability(profile), AuthDead)
         except Exception:  # pragma: no cover - a broken adapter must not block the launch
             pre_launch_auth_dead = False
-    availability = adapter.availability(profile, max_age_seconds=DEFAULT_MAX_AGE_SECONDS)
-    if not _candidate_eligible(profile, availability, now=now):
-        if isinstance(availability, AuthDead):
-            _record_auth_dead(quarantine, quarantine_path, profile)
-        print(_run_refusal(profile, availability, now=now), file=out)
-        return 3
 
     if profile.provider is Provider.CLAUDE:
         argv = adapter.launch_argv(profile, child_args)
@@ -488,7 +481,7 @@ def _cmd_run(
     full_env.update(env)
 
     # The exclusive hold. Two Claude CLIs on one account's HOME concurrently
-            # rotate a single-use refresh token and destroy it -- the
+    # rotate a single-use refresh token and destroy it (whipstack #581) -- the
     # failure the Lease type exists to prevent. A README honesty audit found
     # that this CLI declared the guarantee and never took the lease, so the
     # type was doing nothing where it mattered. It does now.
@@ -509,16 +502,6 @@ def _cmd_run(
         print(f"eggswap run: {profile.key} is held -- {exc}", file=out)
         return 10
     try:
-        # Capacity can change while the account hold is being acquired. Read
-        # again under the fence immediately before spawn.
-        current_availability = adapter.availability(
-            profile, max_age_seconds=DEFAULT_MAX_AGE_SECONDS
-        )
-        if not _candidate_eligible(profile, current_availability, now=now):
-            if isinstance(current_availability, AuthDead):
-                _record_auth_dead(quarantine, quarantine_path, profile)
-            print(_run_refusal(profile, current_availability, now=now), file=out)
-            return 3
         result = runner(argv, env=full_env)
         returncode = getattr(result, "returncode", 0) or 0
         _settle_quarantine(
@@ -562,6 +545,22 @@ def _build_parser() -> argparse.ArgumentParser:
     select_parser = sub.add_parser("select", help="print the chosen profile, do not launch")
     select_parser.add_argument("--provider", choices=[p.value for p in Provider], default=None)
     select_parser.add_argument("--json", action="store_true", dest="as_json")
+    select_parser.add_argument(
+        "--explain", action="store_true",
+        help="print why this profile was chosen and why each other was refused",
+    )
+    select_parser.add_argument(
+        "--cross-provider", dest="cross_provider", default="provider_order",
+        choices=["provider_order", "most_absolute_headroom",
+                 "longest_until_reset", "spread"],
+        help="how to order ACROSS providers; the default is a policy choice, "
+             "not a measurement, because a Claude 5h percentage and a Codex "
+             "7d bucket are different units",
+    )
+    select_parser.add_argument(
+        "--pin", default=None,
+        help="demand one profile key; refuses rather than falling back if it is ineligible",
+    )
 
     clear_parser = sub.add_parser("clear", help="release a hand-held quarantine")
     clear_parser.add_argument("profile_key")
@@ -616,7 +615,6 @@ def main(
         return _cmd_run(
             argv[1:], resolved_adapters, out, runner=runner, store=resolved_store,
             quarantine=resolved_quarantine, quarantine_path=resolved_quarantine_path,
-            now=resolved_now,
         )
 
     parser = _build_parser()
@@ -633,10 +631,12 @@ def main(
         )
     if args.command == "select":
         allow = (Provider(args.provider),) if args.provider else (Provider.CLAUDE, Provider.CODEX)
-        policy = Policy(allow_providers=allow)
+        policy = Policy(allow_providers=allow, pin=args.pin,
+                        cross_provider=args.cross_provider)
         return _cmd_select(
             resolved_adapters, policy, out, now=resolved_now, as_json=args.as_json,
             store=resolved_store, quarantine=resolved_quarantine,
+            explain=args.explain,
         )
     if args.command == "clear":
         return _cmd_clear(args.profile_key, resolved_quarantine, resolved_quarantine_path, out)

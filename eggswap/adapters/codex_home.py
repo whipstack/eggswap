@@ -17,34 +17,48 @@ admin policy can override the config. The binary carries a keyring code path
 (`failed to write OAuth tokens to keyring` is in the shipped 0.156.1 binary),
 so on a keyring-backed install the credential does NOT live under CODEX_HOME
 and two CODEX_HOME directories are not, by themselves, two isolated accounts.
-Separate directories are proof of isolation only where the effective store is
+Separate directories are proof of isolation only where the store is
 file-backed, which is what `store_mode()` below reports per profile.
 
 Measured on the machine this was built against: no `cli_auth_credentials_store`
-in config.toml, and auth.json carries all four token fields non-empty, so this
-profile appears file-backed. UNKNOWN, and recorded as such rather than assumed:
-whether a keyring entry is namespaced per CODEX_HOME. The probe that settles
-it is two logged-in homes on a keyring-backed install, checking whether a
-logout in one revokes the other. Until someone runs it, eggswap labels the
-store and does not promise isolation it has not measured.
+in config.toml, and auth.json carries all four token fields non-empty, so the
+effective store is file.
+
+The keyring case has since been NARROWED, and it got worse rather than better
+(docs/research/eggswap/codex-keyring-namespacing.md). The keyring SERVICE name
+in the 0.156.1 string table is the constant literal "codex" -- one global value
+with no visible per-CODEX_HOME component. The ACCOUNT half of the
+(service, account) pair is built at runtime and is not a literal in the binary,
+so it cannot be read statically. If that half is also constant, then two
+CODEX_HOME directories on a keyring-backed install COLLIDE ON ONE SECRET, and
+a tool rotating between them would hammer a single account's quota believing
+it had two.
+
+So this is not a neutral unknown any more: the one half that can be read looks
+global. eggswap therefore labels the store per profile, promises isolation
+only for the file-backed case it has measured, and the README tells a reader
+with multiple Codex accounts on a keyring-backed install to verify isolation
+before trusting rotation. The experiment that would settle it needs two
+disposable test logins and is written out in that document.
 
 This adapter never reads `access_token`, `refresh_token` or `id_token`. It
 parses only `tokens.account_id` (an address, not a secret), `auth_mode` and
 `OPENAI_API_KEY` (to label a profile, never to use it).
 
 WHY availability() DEFAULTS TO Unknown, NOT Available
------------------------------------------------------
-The reader must return a fresh observed quota window before this adapter can
-report capacity. Missing readers, auth files or provider responses remain
-Unknown; this module never invents a percentage or reset time.
+-------------------------------------------------------
+docs/research/eggswap/codex-ratelimits-probe.md found the `account/
+rateLimits/read` JSON-RPC method and its response struct names in the
+installed binary via `strings`, but made no live call -- there is no observed
+percentage, window or reset time on this install, only evidence the method
+exists. Wiring a reader interface for it while defaulting to None keeps that
+distinction: a future reader can supply real numbers, but this module never
+invents one. Returning Available with no real reading here would be exactly
+the frozen-number failure eggswap/core/types.py exists to prevent.
 """
 from __future__ import annotations
 
-import base64
 import json
-import re
-import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, List, Mapping, Optional
@@ -59,71 +73,6 @@ from eggswap.core.types import (
 #: auth_mode value meaning the profile authenticates with a bare API key
 #: rather than a ChatGPT OAuth token set (codex-account-model.md section 1).
 _APIKEY_MODE = "apikey"
-_STORE_MODES = {"file", "keyring", "auto", "ephemeral"}
-_PREFERENCES_UNSET = object()
-
-
-def _toml_store_mode(text: str) -> Optional[str]:
-    """Read only a top-level credential-store value without a TOML dependency."""
-    section = ""
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if stripped.startswith("["):
-            section = stripped
-            continue
-        if section or not stripped.startswith("cli_auth_credentials_store"):
-            continue
-        match = re.fullmatch(
-            r"cli_auth_credentials_store\s*=\s*(['\"])([^'\"]+)\1\s*(?:#.*)?",
-            stripped,
-        )
-        if match:
-            value = match.group(2)
-            return value if value in _STORE_MODES else "unknown"
-        return "unknown"
-    return None
-
-
-def _managed_preferences() -> Optional[dict[str, str]]:
-    """Read the two relevant macOS MDM TOML payloads without logging them.
-
-    None means the preference probe failed; an empty mapping means no
-    relevant managed preference was set. Values are decoded in memory only.
-    """
-    if sys.platform != "darwin":
-        return {}
-    result: dict[str, str] = {}
-    for key in ("requirements_toml_base64", "config_toml_base64"):
-        try:
-            probe = subprocess.run(
-                ["/usr/bin/defaults", "read", "com.openai.codex", key],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        if probe.returncode != 0:
-            continue
-        try:
-            raw = probe.stdout.strip().strip('"')
-            result[key] = base64.b64decode(raw, validate=True).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            return None
-    return result
-
-
-def _read_policy_file(path: Path) -> Optional[str]:
-    """Read a config layer's store setting; unreadable policy is UNKNOWN."""
-    if not path.exists():
-        return None
-    try:
-        return _toml_store_mode(path.read_text(encoding="utf-8"))
-    except OSError:
-        return "unknown"
 
 
 def _read_auth_json(path: Path) -> Optional[dict]:
@@ -143,12 +92,7 @@ def _read_auth_json(path: Path) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-def _store_mode(
-    home: Path,
-    *,
-    system_policy_dir: Path = Path("/etc/codex"),
-    managed_preferences: Any = _PREFERENCES_UNSET,
-) -> str:
+def _store_mode(home: Path) -> str:
     """Where this home's credential actually lives, as far as we can tell.
 
     "file" only when auth.json really carries the token fields: a config that
@@ -156,30 +100,18 @@ def _store_mode(
     the observable state wins over the declared one. Anything else is reported
     verbatim or as "unknown" -- never silently treated as isolated.
     """
-    if managed_preferences is _PREFERENCES_UNSET:
-        managed_preferences = _managed_preferences()
-    if managed_preferences is None:
-        return "unknown"
+    declared = None
+    config = home / "config.toml"
+    if config.is_file():
+        try:
+            import tomllib
 
-    sources = (
-        _toml_store_mode(managed_preferences["requirements_toml_base64"])
-        if "requirements_toml_base64" in managed_preferences
-        else None,
-        _read_policy_file(system_policy_dir / "requirements.toml"),
-        _read_policy_file(system_policy_dir / "managed_config.toml"),
-        _toml_store_mode(managed_preferences["config_toml_base64"])
-        if "config_toml_base64" in managed_preferences
-        else None,
-        _read_policy_file(home / "config.toml"),
-    )
-    declared_sources = [source for source in sources if source is not None]
-    if "unknown" in declared_sources or len(set(declared_sources)) > 1:
-        # Do not guess which policy layer wins when this adapter cannot prove
-        # that the runtime resolved it the same way.
-        return "unknown"
-    declared = declared_sources[0] if declared_sources else None
-    if declared is not None and declared != "file":
-        return declared
+            with config.open("rb") as handle:
+                declared = tomllib.load(handle).get("cli_auth_credentials_store")
+        except Exception:
+            declared = None
+    if declared and str(declared) != "file":
+        return str(declared)
     auth = home / "auth.json"
     try:
         tokens = json.loads(auth.read_text()).get("tokens") or {}
@@ -205,20 +137,10 @@ class CodexHomeAdapter:
         *,
         clock: Callable[[], float] = time.time,
         rate_limit_reader: Optional[Callable[[Profile], Any]] = None,
-        store_mode_reader: Optional[Callable[[Path], str]] = None,
     ) -> None:
         self._homes = list(homes)
         self._clock = clock
         self._rate_limit_reader = rate_limit_reader
-        self._store_mode_reader = store_mode_reader
-        self._managed_preferences: Any = _PREFERENCES_UNSET
-
-    def _credential_store_mode(self, home: Path) -> str:
-        if self._store_mode_reader is not None:
-            return self._store_mode_reader(home)
-        if self._managed_preferences is _PREFERENCES_UNSET:
-            self._managed_preferences = _managed_preferences()
-        return _store_mode(home, managed_preferences=self._managed_preferences)
 
     @staticmethod
     def _auth_path(home: Path) -> Path:
@@ -258,7 +180,7 @@ class CodexHomeAdapter:
                     is_api_key=is_api_key,
                     metadata={
                         "codex_home": str(home),
-                        "credentials_store": self._credential_store_mode(home),
+                        "credentials_store": _store_mode(home),
                     },
                 )
             )
@@ -281,16 +203,6 @@ class CodexHomeAdapter:
             mtime = now
         if _read_auth_json(auth_path) is None:
             return Unknown(stale_since=mtime, reason="auth.json unreadable or not valid JSON")
-
-        credential_store = self._credential_store_mode(home)
-        if credential_store != "file" and len(self.profiles()) > 1:
-            return Unknown(
-                stale_since=now,
-                reason=(
-                    f"multiple CODEX_HOME profiles use an unverified {credential_store} "
-                    "credential store; account isolation is not established"
-                ),
-            )
 
         if self._rate_limit_reader is None:
             return Unknown(
