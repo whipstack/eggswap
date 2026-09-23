@@ -1,0 +1,40 @@
+eggswap — third-party notices
+==============================
+
+eggswap is an independent implementation. It is NOT a fork of claude-swap,
+and eggswap does not vendor, redistribute, or otherwise include any source
+code from claude-swap or any other project. Nothing in this repository was
+copied from another codebase.
+
+Design attribution
+-------------------
+eggswap's design is informed by realiti4/claude-swap
+(https://github.com/realiti4/claude-swap), which is MIT licensed. Two ideas
+were taken from studying that project, in concept only, and reimplemented
+independently here:
+
+  1. The technique of binding a single Claude CLI process to one account by
+     setting the CLAUDE_CONFIG_DIR environment variable per process, so that
+     concurrent processes on one machine do not share (and corrupt) one
+     account's session state.
+  2. The general shape of a per-account quota/capacity model: tracking usage
+     against a named account so that a scheduler can pick among several
+     accounts rather than always using the same one.
+
+No code, file, string, or configuration from claude-swap is present in this
+repository. eggswap's actual types, algorithms, and CLI are its own, built to
+this project's own honesty and fencing contract (see eggswap/core/types.py).
+
+Upstream copyright notice, reproduced per the MIT license's requirement that
+it be retained wherever the licensed work (or a work informed by it) is
+redistributed:
+
+  MIT License
+
+  Copyright (c) realiti4
+
+  (Full text: https://github.com/realiti4/claude-swap/blob/main/LICENSE)
+
+This NOTICE file exists to satisfy that retention requirement and to state
+plainly what was and was not taken. It is not itself a license grant; see
+LICENSE in this directory for eggswap's own MIT terms.
