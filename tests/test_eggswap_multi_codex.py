@@ -330,6 +330,15 @@ class CredentialStoreModeTests(unittest.TestCase):
         home = self._home("a", auth=self._full_auth("acct-file"))
         self.assertEqual(self._store_of(home), "file")
 
+    def test_declared_store_fallback_without_tomllib(self):
+        home = self._home(
+            "without-tomllib",
+            auth=self._full_auth("acct-without-tomllib"),
+            config='cli_auth_credentials_store = "keyring"\n',
+        )
+        with mock.patch.dict("sys.modules", {"tomllib": None}):
+            self.assertEqual(self._store_of(home), "keyring")
+
     def test_declared_keyring_is_reported_not_swallowed(self):
         home = self._home(
             "b",

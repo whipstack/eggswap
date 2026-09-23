@@ -92,6 +92,45 @@ def _read_auth_json(path: Path) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
+def _declared_store_mode(config: Path) -> Optional[str]:
+    """Read the credential-store setting on Python versions without tomllib.
+
+    The package supports Python 3.10, which predates stdlib tomllib. Falling
+    through to token presence there mislabeled keyring, auto and ephemeral
+    profiles as file-backed, hiding the account-isolation uncertainty.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        try:
+            lines = config.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        in_table = False
+        for raw in lines:
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith("["):
+                in_table = True
+                continue
+            if in_table or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() != "cli_auth_credentials_store":
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
+                return value[1:-1]
+            return None
+        return None
+    try:
+        with config.open("rb") as handle:
+            return tomllib.load(handle).get("cli_auth_credentials_store")
+    except Exception:
+        return None
+
+
 def _store_mode(home: Path) -> str:
     """Where this home's credential actually lives, as far as we can tell.
 
@@ -103,13 +142,7 @@ def _store_mode(home: Path) -> str:
     declared = None
     config = home / "config.toml"
     if config.is_file():
-        try:
-            import tomllib
-
-            with config.open("rb") as handle:
-                declared = tomllib.load(handle).get("cli_auth_credentials_store")
-        except Exception:
-            declared = None
+        declared = _declared_store_mode(config)
     if declared and str(declared) != "file":
         return str(declared)
     auth = home / "auth.json"
