@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Refuse to publish a release if its current tag differs from the event SHA."""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _package_version() -> str:
+    """Read the scalar version under the top-level TOML [project] table.
+
+    Keep the release guard usable on Python 3.10, which the package supports
+    but which does not include tomllib.
+    """
+    in_project = False
+    for line in Path("pyproject.toml").read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped == "[project]":
+            in_project = True
+            continue
+        if stripped.startswith("["):
+            in_project = False
+        if in_project:
+            match = re.fullmatch(r"\s*version\s*=\s*['\"]([^'\"]+)['\"]\s*(?:#.*)?", line)
+            if match:
+                return match.group(1)
+    raise ValueError("pyproject.toml has no scalar version in [project]")
+
+
+def verify_release_tag(tag: str, event_sha: str, repository_url: str) -> str:
+    version = _package_version()
+    expected_tag = f"v{version}"
+    if tag != expected_tag:
+        raise ValueError(f"release tag {tag!r} does not match package version {expected_tag!r}")
+
+    tag_ref = f"refs/tags/{tag}"
+    result = subprocess.run(
+        ["git", "ls-remote", "--tags", repository_url, tag_ref, f"{tag_ref}^{{}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    targets: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or fields[1] not in {tag_ref, f"{tag_ref}^{{}}"}:
+            raise ValueError(f"unexpected git ls-remote output for {tag!r}")
+        if fields[1] in targets:
+            raise ValueError(f"duplicate remote ref for release tag {tag!r}")
+        targets[fields[1]] = fields[0]
+
+    target = targets.get(f"{tag_ref}^{{}}", targets.get(tag_ref))
+    if target != event_sha:
+        raise ValueError(
+            f"release tag {tag!r} now targets {target!r}, not event SHA {event_sha!r}; refusing rerun"
+        )
+    return version
+
+
+def main() -> int:
+    tag = os.environ.get("RELEASE_TAG", "")
+    event_sha = os.environ.get("EVENT_SHA", "")
+    repository_url = os.environ.get("REPOSITORY_URL", "")
+    if not tag or not event_sha or not repository_url:
+        print("RELEASE_TAG, EVENT_SHA, and REPOSITORY_URL are required", file=sys.stderr)
+        return 2
+    try:
+        version = verify_release_tag(tag, event_sha, repository_url)
+    except (OSError, subprocess.CalledProcessError, KeyError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"verified {tag} matches eggswap {version} at event SHA {event_sha}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

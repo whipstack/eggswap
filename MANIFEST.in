@@ -1,0 +1,4 @@
+include CONTRIBUTING.md
+include bin/eggswap-handoff-demo
+include bin/eggswap-verify-release-tag
+recursive-include .github/workflows *.yml
