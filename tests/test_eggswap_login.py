@@ -40,6 +40,43 @@ class LoginTests(unittest.TestCase):
         rc = cli.main(argv, out=output, runner=runner)
         return rc, output.getvalue()
 
+    def test_codex_add_chooses_next_free_home(self):
+        base = self.root / ".local/share/eggswap"
+        occupied = base / "codex-2"
+        occupied.mkdir(parents=True)
+        _fake_auth(occupied, "already-here")
+        chosen = base / "codex-3"
+        calls = []
+
+        def runner(argv, *, env):
+            calls.append((argv, env["CODEX_HOME"]))
+            if argv == ["codex", "login"]:
+                _fake_auth(chosen, "new-account")
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch("eggswap.cli.Path.home", return_value=self.root), \
+             mock.patch("eggswap.cli._default_codex_homes", return_value=[occupied]):
+            rc, output = self._main(["add", "--codex"], runner)
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(calls[0], (["codex", "login"], str(chosen.resolve())))
+        self.assertEqual(enrolled_codex_homes(), [chosen.resolve()])
+        self.assertEqual((occupied / "auth.json").exists(), True)
+
+    def test_codex_add_skips_incompatible_existing_home(self):
+        base = self.root / ".local/share/eggswap"
+        occupied = base / "codex-2"
+        occupied.mkdir(parents=True)
+        (occupied / "config.toml").write_text('cli_auth_credentials_store = "keyring"\n')
+        with mock.patch("eggswap.cli.Path.home", return_value=self.root):
+            self.assertEqual(cli._next_codex_home(), base / "codex-3")
+
+    def test_claude_only_flags_are_rejected_before_login(self):
+        runner = mock.Mock()
+        rc, output = self._main(["add", "--claude", "--device-auth"], runner)
+        self.assertEqual(rc, 2)
+        self.assertIn("Codex options", output)
+        runner.assert_not_called()
+
     def test_codex_login_uses_selected_home_and_enrolls_only_after_success(self):
         home = self.root / "codex-2"
         calls = []
@@ -51,7 +88,7 @@ class LoginTests(unittest.TestCase):
             return SimpleNamespace(returncode=0)
 
         with mock.patch("eggswap.cli._default_codex_homes", return_value=[]):
-            rc, output = self._main(["login", "codex", "--home", str(home)], runner)
+            rc, output = self._main(["add", "--codex", "--home", str(home)], runner)
         self.assertEqual(rc, 0, output)
         self.assertEqual(calls, [
             (["codex", "login"], str(home.resolve())),
@@ -71,7 +108,7 @@ class LoginTests(unittest.TestCase):
             return SimpleNamespace(returncode=1)
 
         with mock.patch("eggswap.cli._default_codex_homes", return_value=[]):
-            rc, _ = self._main(["login", "codex", "--home", str(home)], runner)
+            rc, _ = self._main(["add", "--codex", "--home", str(home)], runner)
         self.assertEqual(rc, 1)
         self.assertEqual(enrolled_codex_homes(), [])
 
@@ -87,7 +124,7 @@ class LoginTests(unittest.TestCase):
             return SimpleNamespace(returncode=0)
 
         with mock.patch("eggswap.cli._default_codex_homes", return_value=[first]):
-            rc, output = self._main(["login", "codex", "--home", str(home)], runner)
+            rc, output = self._main(["add", "--codex", "--home", str(home)], runner)
         self.assertEqual(rc, 3)
         self.assertIn("already present", output)
         self.assertEqual(enrolled_codex_homes(), [])
@@ -97,7 +134,7 @@ class LoginTests(unittest.TestCase):
         home.mkdir(mode=0o700)
         (home / "config.toml").write_text('cli_auth_credentials_store = "keyring"\n')
         runner = mock.Mock()
-        rc, output = self._main(["login", "codex", "--home", str(home)], runner)
+        rc, output = self._main(["add", "--codex", "--home", str(home)], runner)
         self.assertEqual(rc, 2)
         self.assertIn("file", output)
         runner.assert_not_called()
@@ -108,7 +145,7 @@ class LoginTests(unittest.TestCase):
         _fake_auth(home, "existing")
         before = (home / "auth.json").read_bytes()
         runner = mock.Mock()
-        rc, output = self._main(["login", "codex", "--home", str(home)], runner)
+        rc, output = self._main(["add", "--codex", "--home", str(home)], runner)
         self.assertEqual(rc, 2)
         self.assertIn("fresh home", output)
         self.assertEqual((home / "auth.json").read_bytes(), before)
@@ -119,7 +156,7 @@ class LoginTests(unittest.TestCase):
         home.mkdir(mode=0o700)
         with exclusive_login(home):
             runner = mock.Mock()
-            rc, output = self._main(["login", "codex", "--home", str(home)], runner)
+            rc, output = self._main(["add", "--codex", "--home", str(home)], runner)
         self.assertEqual(rc, 2)
         self.assertIn("already active", output)
         runner.assert_not_called()
@@ -131,14 +168,14 @@ class LoginTests(unittest.TestCase):
             calls.append(argv)
             return SimpleNamespace(returncode=0)
 
-        rc, output = self._main(["login", "claude"], runner)
+        rc, output = self._main(["add", "--claude"], runner)
         self.assertEqual(rc, 0, output)
         self.assertEqual(calls, [["claude", "auth", "login"], ["cswap", "add"]])
 
     def test_claude_login_refuses_session_home_before_mutation(self):
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.root / "session")}):
             runner = mock.Mock()
-            rc, output = self._main(["login", "claude"], runner)
+            rc, output = self._main(["add", "--claude"], runner)
         self.assertEqual(rc, 2)
         self.assertIn("unset CLAUDE_CONFIG_DIR", output)
         runner.assert_not_called()

@@ -710,10 +710,10 @@ def _cmd_login(args, *, runner, out) -> int:
     """
     if args.provider == "claude":
         if args.home or args.device_auth:
-            print("eggswap login claude: --home and --device-auth are Codex options", file=out)
+            print("eggswap add --claude: --home and --device-auth are Codex options", file=out)
             return 2
         if os.environ.get("CLAUDE_CONFIG_DIR"):
-            print("eggswap login claude: unset CLAUDE_CONFIG_DIR; cswap add captures the default login", file=out)
+            print("eggswap add --claude: unset CLAUDE_CONFIG_DIR; cswap add captures the default login", file=out)
             return 2
         try:
             login = runner(["claude", "auth", "login"], env=dict(os.environ))
@@ -721,20 +721,20 @@ def _cmd_login(args, *, runner, out) -> int:
                 return login.returncode
             capture = runner(["cswap", "add"], env=dict(os.environ))
         except OSError as exc:
-            print(f"eggswap login claude: provider CLI unavailable: {exc}", file=out)
+            print(f"eggswap add --claude: provider CLI unavailable: {exc}", file=out)
             return 2
         if capture.returncode:
-            print("eggswap login claude: cswap did not register the login", file=out)
+            print("eggswap add --claude: cswap did not register the login", file=out)
             return capture.returncode
         print("Claude login registered in cswap; run eggswap list to inspect it", file=out)
         return 0
 
     if not args.home:
-        print("eggswap login codex: specify --home for the account's separate CODEX_HOME", file=out)
+        print("eggswap add --codex: no CODEX_HOME was selected", file=out)
         return 2
     raw = Path(args.home).expanduser()
     if not raw.is_absolute() or raw.is_symlink():
-        print("eggswap login codex: --home must be an absolute, non-symlink path", file=out)
+        print("eggswap add --codex: --home must be an absolute, non-symlink path", file=out)
         return 2
     home = raw.resolve()
     try:
@@ -768,22 +768,62 @@ def _cmd_login(args, *, runner, out) -> int:
                 return login.returncode
             status = runner(["codex", "login", "status"], env=env)
             if status.returncode:
-                print("eggswap login codex: Codex did not confirm the login", file=out)
+                print("eggswap add --codex: Codex did not confirm the login", file=out)
                 return status.returncode
             profiles = CodexHomeAdapter([home]).profiles()
             if len(profiles) != 1:
-                print("eggswap login codex: no file-backed account identity appeared in this home", file=out)
+                print("eggswap add --codex: no file-backed account identity appeared in this home", file=out)
                 return 3
             profile = profiles[0]
             if profile.account_id in existing_ids:
-                print("eggswap login codex: this account is already present in another CODEX_HOME", file=out)
+                print("eggswap add --codex: this account is already present in another CODEX_HOME", file=out)
                 return 3
             enroll_codex_home(home)
     except (OSError, ValueError) as exc:
-        print(f"eggswap login codex: {exc}", file=out)
+        print(f"eggswap add --codex: {exc}", file=out)
         return 2
     print(f"registered {profile.key} in {home}; run eggswap list to inspect capacity", file=out)
     return 0
+
+
+def _next_codex_home() -> Path:
+    """Choose the next Eggswap-owned home without touching an existing login."""
+    from eggswap.adapters.codex_home import _read_declared_store_config
+    from eggswap.core.codex_homes import enrolled_codex_homes
+
+    base = Path.home() / ".local/share/eggswap"
+    enrolled = {path.resolve() for path in enrolled_codex_homes()}
+    for slot in range(2, 10_000):
+        home = base / f"codex-{slot}"
+        if home.is_symlink() or home.resolve() in enrolled:
+            continue
+        if (home / "auth.json").exists() or (home / "auth.json").is_symlink():
+            continue
+        if home.exists() and not home.is_dir():
+            continue
+        config = home / "config.toml"
+        if config.exists() and (
+            config.is_symlink() or not config.is_file()
+            or _read_declared_store_config(config) != "file"
+        ):
+            continue
+        return home
+    raise ValueError("no free Eggswap Codex home slot")
+
+
+def _cmd_add(args, *, runner, out) -> int:
+    """The short, provider-flag spelling for interactive account enrollment."""
+    try:
+        home = args.home or (str(_next_codex_home()) if args.codex else None)
+    except ValueError as exc:
+        print(f"eggswap add: {exc}", file=out)
+        return 2
+    login_args = argparse.Namespace(
+        provider="codex" if args.codex else "claude",
+        home=home,
+        device_auth=args.device_auth,
+    )
+    return _cmd_login(login_args, runner=runner, out=out)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -793,10 +833,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="every profile, both providers, with honest availability")
     sub.add_parser("status", help="one-line summary + which profiles are schedulable")
 
-    login_parser = sub.add_parser("login", help="sign in through the native provider CLI and enroll the account")
-    login_parser.add_argument("provider", choices=["claude", "codex"])
-    login_parser.add_argument("--home", help="absolute CODEX_HOME path for a Codex account")
-    login_parser.add_argument("--device-auth", action="store_true", help="use Codex's device-code flow")
+    add_parser = sub.add_parser(
+        "add", help="sign in and add one Claude or Codex account",
+        epilog="examples: eggswap add --claude | eggswap add --codex | eggswap add --codex --home /absolute/path",
+    )
+    provider_flags = add_parser.add_mutually_exclusive_group(required=True)
+    provider_flags.add_argument("--codex", action="store_true", help="add a Codex account in a private home")
+    provider_flags.add_argument("--claude", action="store_true", help="sign in to Claude, then register it through cswap")
+    add_parser.add_argument("--home", help="optional CODEX_HOME; otherwise use the next Eggswap slot")
+    add_parser.add_argument("--device-auth", action="store_true", help="use Codex's device-code flow")
 
     select_parser = sub.add_parser("select", help="print the chosen profile, do not launch")
     select_parser.add_argument("--provider", choices=[p.value for p in Provider], default=None)
@@ -847,9 +892,9 @@ def main(
     quarantine=None,
     quarantine_path: Optional[Path] = None,
 ) -> int:
-    if argv and argv[0] == "login":
+    if argv and argv[0] == "add":
         args = _build_parser().parse_args(argv)
-        return _cmd_login(args, runner=runner, out=out)
+        return _cmd_add(args, runner=runner, out=out)
     resolved_adapters = _default_adapters() if adapters is None else list(adapters)
     resolved_now = time.time() if now is None else now
     # `store=False` disables the hold entirely (tests, and anyone who wants the
