@@ -27,6 +27,7 @@ look at `lastGoodUsage` at all once `usageStatus == "relogin_required"`.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import time
 from datetime import datetime
@@ -239,16 +240,40 @@ class ClaudeCswapAdapter:
         exhausted_bucket = None
         exhausted_reset_at = None
 
+        malformed = False
+
         def _consider(bucket_name: str, bucket: Optional[dict], *, binding: bool) -> None:
+            nonlocal malformed
             nonlocal exhausted_bucket, exhausted_reset_at
-            if not isinstance(bucket, dict) or "pct" not in bucket:
+            if bucket is None:
                 return
-            pct = float(bucket["pct"])
-            reset_at = _parse_iso8601(bucket.get("resetsAt"))
+            if not isinstance(bucket, dict) or "pct" not in bucket:
+                malformed = True
+                return
+            raw_pct = bucket["pct"]
+            if isinstance(raw_pct, bool) or not isinstance(raw_pct, (int, float)):
+                malformed = True
+                return
+            try:
+                pct = float(raw_pct)
+            except (OverflowError, ValueError):
+                malformed = True
+                return
+            if not math.isfinite(pct) or not 0.0 <= pct <= 100.0:
+                malformed = True
+                return
+            raw_reset = bucket.get("resetsAt")
+            if raw_reset is not None and not isinstance(raw_reset, str):
+                malformed = True
+                return
+            reset_at = _parse_iso8601(raw_reset)
+            if raw_reset and reset_at is None:
+                malformed = True
+                return
             windows.append(
                 QuotaWindow(
                     bucket=bucket_name,
-                    used_percent=min(max(pct, 0.0), 100.0),
+                    used_percent=pct,
                     window_seconds=None,
                     resets_at=reset_at,
                     observed_at=fetched_at,
@@ -264,14 +289,26 @@ class ClaudeCswapAdapter:
         _consider("fiveHour", usage.get("fiveHour"), binding=True)
         _consider("sevenDay", usage.get("sevenDay"), binding=True)
         wanted = (model or "").strip().casefold()
-        for scoped in usage.get("scoped") or []:
+        scoped_buckets = usage.get("scoped") or []
+        if not isinstance(scoped_buckets, list):
+            malformed = True
+            scoped_buckets = []
+        for scoped in scoped_buckets:
             name = scoped.get("name") if isinstance(scoped, dict) else None
-            if not name:
+            if not isinstance(scoped, dict) or not isinstance(name, str) or not name.strip():
+                malformed = True
                 continue
             # Binding only when this IS the requested model's bucket. With no
             # model asked for, no scoped bucket binds: the account is usable
             # for whatever model the caller has not named yet.
             _consider(name, scoped, binding=bool(wanted) and name.strip().casefold() == wanted)
+
+        if malformed:
+            return Unknown(
+                stale_since=fetched_at,
+                reason="malformed quota bucket in cswap usage",
+                windows=tuple(windows),
+            )
 
         if exhausted_bucket is not None:
             return Exhausted(

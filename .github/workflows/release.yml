@@ -22,7 +22,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -31,26 +32,14 @@ jobs:
       - name: Require the tag to match the package version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          python - <<'PY'
-          import os
-          import tomllib
-          from pathlib import Path
+          EVENT_SHA: ${{ github.sha }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: python bin/eggswap-verify-release-tag
 
-          metadata = tomllib.loads(Path("eggswap/pyproject.toml").read_text())
-          version = metadata["project"]["version"]
-          tag = os.environ["RELEASE_TAG"]
-          expected = f"v{version}"
-          if tag != expected:
-              raise SystemExit(f"release tag {tag!r} does not match package version {expected!r}")
-          print(f"verified {tag} matches eggswap {version}")
-          PY
-
-      - name: Export and test the standalone repository tree
-        run: bin/eggswap-export "$RUNNER_TEMP/eggswap-export"
+      - name: Run the standalone test suite
+        run: python -m unittest discover -s tests
 
       - name: Build wheel and source distribution
-        working-directory: ${{ runner.temp }}/eggswap-export
         run: |
           python -m pip install --disable-pip-version-check build
           python -m build
@@ -62,7 +51,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          assets="$RUNNER_TEMP/eggswap-export/dist"
+          assets="dist"
           existing="$RUNNER_TEMP/eggswap-existing-release-assets"
           mkdir -p "$existing"
 

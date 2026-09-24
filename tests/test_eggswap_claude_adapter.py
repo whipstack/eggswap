@@ -282,6 +282,39 @@ class AvailabilityTests(unittest.TestCase):
         self.assertEqual(availability.bucket, "fiveHour")
         self.assertIsNotNone(availability.reset_at)
 
+    def _custom_usage_result(self, *, scoped=None, five_hour_pct=4):
+        account = {
+            "number": 9,
+            "usageStatus": "ok",
+            "usage": {
+                "fiveHour": {"pct": five_hour_pct},
+                "sevenDay": {"pct": 10},
+                "scoped": scoped if scoped is not None else [],
+            },
+            "usageFetchedAt": "2026-09-23T13:27:25Z",
+            "usageAgeSeconds": 5,
+        }
+        return _fake_result(json.dumps({"accounts": [account]}))
+
+    def test_malformed_percentage_data_maps_to_unknown(self):
+        values = ("not-a-number", float("nan"), float("inf"), 10**4000, 101, -1, True)
+        for index, value in enumerate(values):
+            with self.subTest(case=index):
+                availability = self._adapter(result=self._custom_usage_result(five_hour_pct=value)).availability(
+                    Profile(provider=Provider.CLAUDE, account_id="9")
+                )
+                self.assertIsInstance(availability, Unknown)
+                self.assertFalse(availability.schedulable)
+
+    def test_malformed_scoped_name_maps_to_unknown(self):
+        for index, name in enumerate((None, 42, {"name": "nested"}, "  ")):
+            with self.subTest(case=index):
+                availability = self._adapter(
+                    result=self._custom_usage_result(scoped=[{"name": name, "pct": 5}])
+                ).availability(Profile(provider=Provider.CLAUDE, account_id="9"))
+                self.assertIsInstance(availability, Unknown)
+                self.assertFalse(availability.schedulable)
+
     def test_subprocess_failure_is_unknown(self):
         adapter = self._adapter(runner=_raising_runner(OSError("cswap not found")))
         profile = Profile(provider=Provider.CLAUDE, account_id="4")

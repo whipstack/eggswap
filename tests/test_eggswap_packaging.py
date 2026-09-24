@@ -257,12 +257,14 @@ class TheReleaseWorkflowIsVersionGatedTests(unittest.TestCase):
 
     def test_only_version_tags_trigger_a_release(self):
         self.assertIn('tags: ["v*"]', self.text)
-        self.assertIn('expected = f"v{version}"', self.text)
-        self.assertIn('if tag != expected:', self.text)
+        repo_root = EGGSWAP_DIR.parent if EGGSWAP_DIR.name == "eggswap" else EGGSWAP_DIR
+        verifier = (repo_root / "bin" / "eggswap-verify-release-tag").read_text(encoding="utf-8")
+        self.assertIn('expected_tag = f"v{version}"', verifier)
+        self.assertIn('if tag != expected_tag:', verifier)
 
     def test_release_builds_and_attaches_standalone_distributions(self):
         for required in (
-            "bin/eggswap-export",
+            "python -m unittest discover -s tests",
             "python -m build",
             "gh release create",
             "gh release upload",
@@ -271,6 +273,7 @@ class TheReleaseWorkflowIsVersionGatedTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, self.text)
         self.assertNotIn("twine upload", self.text)
+        self.assertNotIn("bin/eggswap-export", self.text)
 
     def test_release_reruns_verify_assets_and_refuse_differences(self):
         for required in (
@@ -282,6 +285,12 @@ class TheReleaseWorkflowIsVersionGatedTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, self.text)
         self.assertNotIn("--clobber", self.text)
+
+    def test_release_checkout_is_pinned_and_moved_tags_are_refused(self):
+        self.assertIn("ref: ${{ github.sha }}", self.text)
+        self.assertNotIn("ref: ${{ github.ref }}", self.text)
+        self.assertIn('EVENT_SHA: ${{ github.sha }}', self.text)
+        self.assertIn("bin/eggswap-verify-release-tag", self.text)
 
     def test_write_permission_is_scoped_to_the_release_job(self):
         self.assertIn("permissions:\n  contents: read", self.text)
