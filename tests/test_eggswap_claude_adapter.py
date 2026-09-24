@@ -166,7 +166,7 @@ FIXTURE_JSON = json.dumps(
     }
 )
 
-NOW = 1758633000.0  # fixed instant, 2026-09-23T13:30:00Z-ish; tests never touch the wall clock
+NOW = 1790170200.0  # fixed instant, 2026-09-23T13:30:00Z; tests never touch the wall clock
 
 
 def _fake_result(stdout: str = FIXTURE_JSON, returncode: int = 0) -> subprocess.CompletedProcess:
@@ -282,7 +282,10 @@ class AvailabilityTests(unittest.TestCase):
         self.assertEqual(availability.bucket, "fiveHour")
         self.assertIsNotNone(availability.reset_at)
 
-    def _custom_usage_result(self, *, scoped=None, five_hour_pct=4):
+    def _custom_usage_result(
+        self, *, scoped=None, five_hour_pct=4,
+        fetched_at="2026-09-23T13:27:25Z", age_seconds=5,
+    ):
         account = {
             "number": 9,
             "usageStatus": "ok",
@@ -291,8 +294,8 @@ class AvailabilityTests(unittest.TestCase):
                 "sevenDay": {"pct": 10},
                 "scoped": scoped if scoped is not None else [],
             },
-            "usageFetchedAt": "2026-09-23T13:27:25Z",
-            "usageAgeSeconds": 5,
+            "usageFetchedAt": fetched_at,
+            "usageAgeSeconds": age_seconds,
         }
         return _fake_result(json.dumps({"accounts": [account]}))
 
@@ -323,6 +326,34 @@ class AvailabilityTests(unittest.TestCase):
                 ).availability(Profile(provider=Provider.CLAUDE, account_id="9"))
                 self.assertIsInstance(availability, Unknown)
                 self.assertFalse(availability.schedulable)
+
+    def test_malformed_or_pre_epoch_observation_time_maps_to_unknown(self):
+        values = (None, 42, {}, "not-a-timestamp", "0001-01-01T00:00:00Z")
+        for index, fetched_at in enumerate(values):
+            with self.subTest(case=index):
+                availability = self._adapter(
+                    result=self._custom_usage_result(fetched_at=fetched_at)
+                ).availability(Profile(provider=Provider.CLAUDE, account_id="9"))
+                self.assertIsInstance(availability, Unknown)
+                self.assertFalse(availability.schedulable)
+
+    def test_malformed_age_maps_to_unknown_and_timestamp_still_enforces_freshness(self):
+        values = ("not-a-number", float("nan"), float("inf"), 10**4000, -1, True)
+        for index, age in enumerate(values):
+            with self.subTest(case=index):
+                availability = self._adapter(
+                    result=self._custom_usage_result(age_seconds=age)
+                ).availability(Profile(provider=Provider.CLAUDE, account_id="9"))
+                self.assertIsInstance(availability, Unknown)
+                self.assertFalse(availability.schedulable)
+
+        stale = self._adapter(
+            result=self._custom_usage_result(
+                fetched_at="2026-09-17T13:25:22Z", age_seconds=0,
+            )
+        ).availability(Profile(provider=Provider.CLAUDE, account_id="9"))
+        self.assertIsInstance(stale, Unknown)
+        self.assertIn("stale", stale.reason)
 
     def test_subprocess_failure_is_unknown(self):
         adapter = self._adapter(runner=_raising_runner(OSError("cswap not found")))

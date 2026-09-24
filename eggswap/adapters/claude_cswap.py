@@ -58,14 +58,14 @@ def _parse_iso8601(value: Optional[str]) -> Optional[float]:
     explicit "+00:00" offset. `datetime.fromisoformat` on Python 3.10 accepts
     the offset form but not "Z", so "Z" is normalized before parsing.
     """
-    if not value:
+    if not isinstance(value, str) or not value:
         return None
     text = value.strip()
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(text).timestamp()
-    except ValueError:
+    except (ValueError, OverflowError, OSError):
         return None
 
 
@@ -225,15 +225,32 @@ class ClaudeCswapAdapter:
 
         usage = account.get("usage")
         fetched_at = _parse_iso8601(account.get("usageFetchedAt"))
-        if status != _OK_STATUS or not isinstance(usage, dict) or fetched_at is None:
+        if (
+            status != _OK_STATUS
+            or not isinstance(usage, dict)
+            or fetched_at is None
+            or not math.isfinite(fetched_at)
+            or fetched_at <= 0
+        ):
             return Unknown(
                 stale_since=now,
                 reason=f"unrecognized usageStatus={status!r} or missing/unparseable usage",
             )
 
         age_seconds = account.get("usageAgeSeconds")
-        if isinstance(age_seconds, (int, float)) and age_seconds > max_age_seconds:
-            return Unknown(stale_since=now - float(age_seconds), reason="stale usage")
+        reported_age = 0.0
+        if age_seconds is not None:
+            if isinstance(age_seconds, bool) or not isinstance(age_seconds, (int, float)):
+                return Unknown(stale_since=fetched_at, reason="malformed usage age")
+            try:
+                reported_age = float(age_seconds)
+            except (OverflowError, ValueError):
+                return Unknown(stale_since=fetched_at, reason="malformed usage age")
+            if not math.isfinite(reported_age) or reported_age < 0:
+                return Unknown(stale_since=fetched_at, reason="malformed usage age")
+        observed_age = max(0.0, now - fetched_at)
+        if max(observed_age, reported_age) > max_age_seconds:
+            return Unknown(stale_since=fetched_at, reason="stale usage")
 
         windows = []
         binding_windows = []
@@ -270,8 +287,8 @@ class ClaudeCswapAdapter:
             if raw_reset and reset_at is None:
                 malformed = True
                 return
-            windows.append(
-                QuotaWindow(
+            try:
+                window = QuotaWindow(
                     bucket=bucket_name,
                     used_percent=pct,
                     window_seconds=None,
@@ -279,7 +296,10 @@ class ClaudeCswapAdapter:
                     observed_at=fetched_at,
                     model_scope=None if binding else bucket_name,
                 )
-            )
+            except (TypeError, ValueError, OverflowError):
+                malformed = True
+                return
+            windows.append(window)
             if binding:
                 binding_windows.append(windows[-1])
             if pct >= 100.0 and binding and exhausted_bucket is None:
