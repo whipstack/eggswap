@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +38,7 @@ from eggswap.core.types import (
     Lease,
     LeaseError,
     Profile,
+    ProfileDisabled,
     Provider,
     StaleFence,
     WorkSpec,
@@ -161,6 +164,46 @@ class LeaseStore:
     def _now(self) -> float:
         return self._clock()
 
+    @staticmethod
+    def _operator_enabled(record: Optional[dict], profile_key: str) -> bool:
+        if record is None:
+            return True
+        saved_profile = record.get("profile")
+        if not isinstance(saved_profile, dict):
+            raise ValueError(f"invalid profile state for {profile_key}")
+        enabled = saved_profile.get("operator_enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"invalid operator-enabled state for {profile_key}")
+        return enabled
+
+    def apply_profile_state(self, profile: Profile) -> Profile:
+        """Apply the durable operator-enabled bit to a freshly discovered profile.
+
+        Adapter disablement remains authoritative too; this setting only adds
+        an operator veto and never promotes an adapter-disabled profile.
+        """
+        with self._locked(profile):
+            record = self._read_raw(self._path(profile))
+        operator_enabled = self._operator_enabled(record, profile.key)
+        return replace(profile, enabled=bool(profile.enabled and operator_enabled))
+
+    def set_enabled(self, profile: Profile, enabled: bool) -> None:
+        """Persist an operator enable/disable without disturbing a live lease."""
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        with self._locked(profile):
+            path = self._path(profile)
+            record = self._read_raw(path)
+            if record is None:
+                record = {"profile": self._profile_to_dict(profile), "fence": 0, "lease": None}
+            saved_profile = dict(record.get("profile") or self._profile_to_dict(profile))
+            saved_profile.update(self._profile_to_dict(profile))
+            saved_profile["operator_enabled"] = enabled
+            record["profile"] = saved_profile
+            record.setdefault("fence", 0)
+            record.setdefault("lease", None)
+            self._write_raw(path, record)
+
     def acquire(
         self,
         profile: Profile,
@@ -169,9 +212,15 @@ class LeaseStore:
         holder: str,
         workspec: WorkSpec = WorkSpec(),
     ) -> Lease:
+        if not math.isfinite(ttl_seconds) or ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be a finite positive number")
         with self._locked(profile):
             path = self._path(profile)
             record = self._read_raw(path)
+            if not profile.enabled:
+                raise ProfileDisabled(f"{profile.key}: profile disabled")
+            if not self._operator_enabled(record, profile.key):
+                raise ProfileDisabled(f"{profile.key}: profile disabled by operator")
             now = self._now()
             current_fence = record["fence"] if record is not None else 0
             live_lease = record.get("lease") if record is not None else None
@@ -209,6 +258,32 @@ class LeaseStore:
             if live_lease is None or live_lease["expires_at"] <= now:
                 raise LeaseError(f"{lease.profile.key}: lease {lease.lease_id} expired")
             return self._lease_from_record(lease.profile, current_fence, live_lease)
+
+    def renew(self, lease: Lease, *, ttl_seconds: float) -> Lease:
+        """Extend a live lease without changing its identity or fence.
+
+        Renewal is fenced and atomic: an expired or superseded holder can
+        never resurrect its lease or overwrite the replacement's record.
+        """
+        if not math.isfinite(ttl_seconds) or ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be a finite positive number")
+        with self._locked(lease.profile):
+            path = self._path(lease.profile)
+            record = self._read_raw(path)
+            current_fence = record["fence"] if record is not None else 0
+            if lease.fence != current_fence:
+                raise StaleFence(lease.profile.key, lease.fence, current_fence)
+            live_lease = record.get("lease") if record is not None else None
+            now = self._now()
+            if live_lease is None or live_lease["expires_at"] <= now:
+                raise LeaseError(f"{lease.profile.key}: lease {lease.lease_id} expired")
+            if live_lease["lease_id"] != lease.lease_id:
+                raise StaleFence(lease.profile.key, lease.fence, current_fence)
+            renewed = dict(live_lease)
+            renewed["expires_at"] = now + ttl_seconds
+            record["lease"] = renewed
+            self._write_raw(path, record)
+            return self._lease_from_record(lease.profile, current_fence, renewed)
 
     def release(self, lease: Lease) -> None:
         with self._locked(lease.profile):

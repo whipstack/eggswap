@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -34,6 +35,7 @@ from eggswap.core.types import (
     Exhausted,
     NoCapacity,
     Profile,
+    ProfileDisabled,
     Provider,
     Unknown,
     LeaseError,
@@ -44,6 +46,51 @@ from eggswap.core.quarantine import AUTH_DEAD, Failure, INDEFINITE, Quarantine, 
 __all__ = ["main"]
 
 DEFAULT_MAX_AGE_SECONDS = 300.0
+DEFAULT_LEASE_TTL_SECONDS = 3600.0
+
+
+def _stop_child(process) -> None:
+    """Stop the process tree after lease loss; do not leave fenced work running."""
+    try:
+        if os.name == "posix" and getattr(process, "pid", None):
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "posix" and getattr(process, "pid", None):
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def _run_leased(argv, env, *, store, lease, ttl_seconds, popen_factory):
+    """Run the child while renewing its fenced lease; return (code, lost)."""
+    process_options = {"env": env}
+    if os.name == "posix":
+        process_options["start_new_session"] = True
+    process = popen_factory(argv, **process_options)
+    heartbeat = min(60.0, ttl_seconds / 3.0)
+    while True:
+        try:
+            return process.wait(timeout=heartbeat), False
+        except subprocess.TimeoutExpired:
+            # Renew only a still-live lease. If its fence was replaced or it
+            # expired while the process was descheduled, stop the child before
+            # returning control to a caller that might launch replacement work.
+            try:
+                lease = store.renew(lease, ttl_seconds=ttl_seconds)
+                store.revalidate(lease)
+            except (LeaseError, StaleFence):
+                _stop_child(process)
+                return process.returncode if process.returncode is not None else 10, True
 
 
 def default_lease_root() -> Path:
@@ -227,11 +274,18 @@ def _score(availability) -> float:
     return 100.0 - max(w.used_percent for w in availability.scheduling_windows)
 
 
-def _build_candidates(adapters: Sequence[Any], *, now: float, max_age_seconds: float) -> List[Candidate]:
+def _build_candidates(
+    adapters: Sequence[Any], *, now: float, max_age_seconds: float, store=None
+) -> List[Candidate]:
     candidates: List[Candidate] = []
     for adapter in adapters:
         for profile in adapter.profiles():
-            availability = adapter.availability(profile, max_age_seconds=max_age_seconds)
+            if store is not None and hasattr(store, "apply_profile_state"):
+                profile = store.apply_profile_state(profile)
+            if profile.enabled:
+                availability = adapter.availability(profile, max_age_seconds=max_age_seconds)
+            else:
+                availability = Unknown(stale_since=now, reason="profile disabled")
             candidates.append(
                 Candidate(profile=profile, availability=availability, score=_score(availability))
             )
@@ -296,14 +350,18 @@ def _warn_enumeration(adapters, out) -> None:
         print(f"{provider}: UNKNOWN -- account list unreadable: {reason}", file=out)
 
 
-def _cmd_list(adapters, policy: Policy, out, *, now: float) -> int:
-    candidates = _build_candidates(adapters, now=now, max_age_seconds=policy.max_age_seconds)
+def _cmd_list(adapters, policy: Policy, out, *, now: float, store=None) -> int:
+    candidates = _build_candidates(
+        adapters, now=now, max_age_seconds=policy.max_age_seconds, store=store
+    )
     _warn_enumeration(adapters, out)
     if not candidates:
         print("no profiles configured", file=out)
         return 0
     for candidate in candidates:
         line = _render_availability(candidate.availability, max_age_seconds=policy.max_age_seconds, now=now)
+        if not candidate.profile.enabled:
+            line = "disabled"
         print(f"{candidate.profile.key}\t{candidate.profile.label}\t{line}", file=out)
     return 0
 
@@ -319,7 +377,9 @@ def _quarantine_line(quarantine: Quarantine, key: str) -> str:
 
 
 def _cmd_status(adapters, policy: Policy, out, *, now: float, store=None, quarantine=None) -> int:
-    candidates = _build_candidates(adapters, now=now, max_age_seconds=policy.max_age_seconds)
+    candidates = _build_candidates(
+        adapters, now=now, max_age_seconds=policy.max_age_seconds, store=store
+    )
     _warn_enumeration(adapters, out)
     held = _held_keys(store, [c.profile for c in candidates], now=now)
     quarantined = set()
@@ -329,7 +389,8 @@ def _cmd_status(adapters, policy: Policy, out, *, now: float, store=None, quaran
         }
     schedulable = [
         c for c in candidates
-        if c.availability.schedulable and c.profile.key not in held and c.profile.key not in quarantined
+        if c.profile.enabled and c.availability.schedulable
+        and c.profile.key not in held and c.profile.key not in quarantined
     ]
     print(
         f"{len(candidates)} profile(s), {len(schedulable)} schedulable: "
@@ -338,13 +399,18 @@ def _cmd_status(adapters, policy: Policy, out, *, now: float, store=None, quaran
     )
     if held:
         print("held: " + ", ".join(sorted(held)), file=out)
+    disabled = sorted(c.profile.key for c in candidates if not c.profile.enabled)
+    if disabled:
+        print("disabled: " + ", ".join(disabled), file=out)
     for key in sorted(quarantined):
         print(_quarantine_line(quarantine, key), file=out)
     return 0 if schedulable else 3
 
 
 def _cmd_select(adapters, policy: Policy, out, *, now: float, as_json: bool, store=None, quarantine=None, explain: bool = False) -> int:
-    candidates = _build_candidates(adapters, now=now, max_age_seconds=policy.max_age_seconds)
+    candidates = _build_candidates(
+        adapters, now=now, max_age_seconds=policy.max_age_seconds, store=store
+    )
     held = _held_keys(store, [c.profile for c in candidates], now=now)
     candidates = [c for c in candidates if c.profile.key not in held]
     if quarantine is not None:
@@ -384,6 +450,10 @@ def _cmd_select(adapters, policy: Policy, out, *, now: float, as_json: bool, sto
     try:
         chosen = select_candidate(candidates, policy, now=now)
     except NoCapacity as exc:
+        disabled = sorted(c.profile.key for c in candidates if not c.profile.enabled)
+        if disabled:
+            print("no schedulable profile: disabled " + ", ".join(disabled), file=out)
+            return 3
         # NoCapacity already renders its own "no schedulable profile: ..."
         # preamble with the per-profile reasons; prefixing it again produced
         # "no schedulable profile: no schedulable profile: claude:2=AuthDead".
@@ -405,10 +475,12 @@ def _cmd_select(adapters, policy: Policy, out, *, now: float, as_json: bool, sto
     return 0
 
 
-def _find_profile(adapters, profile_key: str):
+def _find_profile(adapters, profile_key: str, *, store=None):
     for adapter in adapters:
         for profile in adapter.profiles():
             if profile.key == profile_key:
+                if store is not None and hasattr(store, "apply_profile_state"):
+                    profile = store.apply_profile_state(profile)
                 return adapter, profile
     return None, None
 
@@ -444,9 +516,12 @@ def _cmd_run(
     *,
     runner: Callable[..., Any],
     store=None,
-    ttl_seconds: float = 3600.0,
+    ttl_seconds: float = DEFAULT_LEASE_TTL_SECONDS,
+    popen_factory: Callable[..., Any] = subprocess.Popen,
     quarantine=None,
     quarantine_path: Optional[Path] = None,
+    now: Optional[float] = None,
+    max_age_seconds: float = 300.0,
 ) -> int:
     tokens = list(rest)
     dry_run = False
@@ -461,17 +536,44 @@ def _cmd_run(
         tokens = tokens[1:]
     child_args = tokens
 
-    adapter, profile = _find_profile(adapters, profile_key)
+    adapter, profile = _find_profile(adapters, profile_key, store=store)
     if profile is None:
         print(f"eggswap run: unknown profile {profile_key!r}", file=out)
         return 2
+    if not profile.enabled:
+        print(f"eggswap run: refusing {profile.key}: profile disabled", file=out)
+        return 3
 
-    pre_launch_auth_dead = False
-    if quarantine is not None:
-        try:
-            pre_launch_auth_dead = isinstance(adapter.availability(profile), AuthDead)
-        except Exception:  # pragma: no cover - a broken adapter must not block the launch
-            pre_launch_auth_dead = False
+    # A manually named profile is still subject to the same admission checks
+    # as an automatically selected one. In particular, UNKNOWN is not a
+    # license to launch, and API-key profiles stay off until run has an
+    # explicit opt-in plus a positive budget surface.
+    resolved_now = time.time() if now is None else now
+    try:
+        availability = adapter.availability(
+            profile, max_age_seconds=max_age_seconds
+        )
+    except Exception as exc:
+        availability = Unknown(
+            stale_since=resolved_now,
+            reason=f"availability probe failed: {type(exc).__name__}",
+        )
+    candidate = Candidate(
+        profile=profile,
+        availability=availability,
+        score=_score(availability),
+    )
+    try:
+        select_candidate([candidate], Policy(), now=resolved_now)
+    except NoCapacity as exc:
+        if isinstance(availability, AuthDead) and quarantine is not None:
+            quarantine.record(profile.key, AUTH_DEAD, detail=availability.reason)
+            if quarantine_path is not None:
+                save_quarantine(quarantine, quarantine_path)
+        print(f"eggswap run: refusing {profile.key}: {exc}", file=out)
+        return 3
+
+    pre_launch_auth_dead = isinstance(availability, AuthDead)
 
     if profile.provider is Provider.CLAUDE:
         argv = adapter.launch_argv(profile, child_args)
@@ -505,12 +607,50 @@ def _cmd_run(
         lease = store.acquire(
             profile, ttl_seconds=ttl_seconds, holder=f"eggswap-cli:{os.getpid()}"
         )
+    except ProfileDisabled as exc:
+        print(f"eggswap run: refusing {profile.key}: {exc}", file=out)
+        return 3
     except LeaseError as exc:
         print(f"eggswap run: {profile.key} is held -- {exc}", file=out)
         return 10
     try:
-        result = runner(argv, env=full_env)
-        returncode = getattr(result, "returncode", 0) or 0
+        # Reservation may wait behind another process. Re-read capacity after
+        # acquiring the fence so a quota transition during that wait cannot
+        # authorize a stale launch.
+        try:
+            reserved_availability = adapter.availability(
+                profile, max_age_seconds=max_age_seconds
+            )
+        except Exception as exc:
+            reserved_availability = Unknown(
+                stale_since=time.time(),
+                reason=f"availability probe failed: {type(exc).__name__}",
+            )
+        try:
+            select_candidate(
+                [Candidate(profile, reserved_availability, _score(reserved_availability))],
+                Policy(),
+                now=resolved_now,
+            )
+        except NoCapacity as exc:
+            if isinstance(reserved_availability, AuthDead) and quarantine is not None:
+                quarantine.record(profile.key, AUTH_DEAD, detail=reserved_availability.reason)
+                if quarantine_path is not None:
+                    save_quarantine(quarantine, quarantine_path)
+            print(f"eggswap run: refusing {profile.key} after reservation: {exc}", file=out)
+            return 3
+        try:
+            store.revalidate(lease)
+        except (LeaseError, StaleFence) as exc:
+            print(f"eggswap run: refusing {profile.key}: lease lost before launch -- {exc}", file=out)
+            return 10
+        returncode, lease_lost = _run_leased(
+            argv, full_env, store=store, lease=lease,
+            ttl_seconds=ttl_seconds, popen_factory=popen_factory,
+        )
+        if lease_lost:
+            print(f"eggswap run: lease lost during run for {profile.key}; child stopped", file=out)
+            return 10
         _settle_quarantine(
             quarantine, quarantine_path, profile, returncode,
             pre_launch_auth_dead=pre_launch_auth_dead,
@@ -539,6 +679,21 @@ def _cmd_clear(profile_key: str, quarantine, quarantine_path: Optional[Path], ou
         if quarantine_path is not None:
             save_quarantine(quarantine, quarantine_path)
     print(f"cleared {profile_key}", file=out)
+    return 0
+
+
+def _cmd_profile_enabled(adapters, profile_key: str, *, enabled: bool, store, out) -> int:
+    """Persist an operator profile preference for subsequent discovery runs."""
+    if store is None or not hasattr(store, "set_enabled"):
+        print("eggswap: persistent profile state is unavailable", file=out)
+        return 2
+    adapter, profile = _find_profile(adapters, profile_key)
+    if profile is None:
+        print(f"eggswap: unknown profile {profile_key!r}", file=out)
+        return 2
+    store.set_enabled(profile, enabled)
+    state = "enabled" if enabled else "disabled"
+    print(f"{state} {profile.key}", file=out)
     return 0
 
 
@@ -572,6 +727,11 @@ def _build_parser() -> argparse.ArgumentParser:
     clear_parser = sub.add_parser("clear", help="release a hand-held quarantine")
     clear_parser.add_argument("profile_key")
 
+    disable_parser = sub.add_parser("disable", help="disable a profile for future work")
+    disable_parser.add_argument("profile_key")
+    enable_parser = sub.add_parser("enable", help="re-enable a previously disabled profile")
+    enable_parser.add_argument("profile_key")
+
     # "run" is parsed manually in main() because of the literal "--" separator
     # before the child command's own args; argparse's REMAINDER handling
     # would swallow --dry-run if it appeared after the profile key.
@@ -587,7 +747,9 @@ def main(
     out=sys.stdout,
     now: Optional[float] = None,
     runner: Callable[..., Any] = subprocess.run,
+    popen_factory: Callable[..., Any] = subprocess.Popen,
     store=None,
+    ttl_seconds: float = DEFAULT_LEASE_TTL_SECONDS,
     quarantine=None,
     quarantine_path: Optional[Path] = None,
 ) -> int:
@@ -621,7 +783,9 @@ def main(
     if argv and argv[0] == "run":
         return _cmd_run(
             argv[1:], resolved_adapters, out, runner=runner, store=resolved_store,
+            ttl_seconds=ttl_seconds, popen_factory=popen_factory,
             quarantine=resolved_quarantine, quarantine_path=resolved_quarantine_path,
+            now=resolved_now,
         )
 
     parser = _build_parser()
@@ -629,7 +793,7 @@ def main(
 
     if args.command == "list":
         policy = Policy()
-        return _cmd_list(resolved_adapters, policy, out, now=resolved_now)
+        return _cmd_list(resolved_adapters, policy, out, now=resolved_now, store=resolved_store)
     if args.command == "status":
         policy = Policy()
         return _cmd_status(
@@ -647,6 +811,16 @@ def main(
         )
     if args.command == "clear":
         return _cmd_clear(args.profile_key, resolved_quarantine, resolved_quarantine_path, out)
+    if args.command == "disable":
+        return _cmd_profile_enabled(
+            resolved_adapters, args.profile_key, enabled=False,
+            store=resolved_store, out=out,
+        )
+    if args.command == "enable":
+        return _cmd_profile_enabled(
+            resolved_adapters, args.profile_key, enabled=True,
+            store=resolved_store, out=out,
+        )
 
     parser.error(f"unknown command {args.command!r}")  # pragma: no cover
     return 2

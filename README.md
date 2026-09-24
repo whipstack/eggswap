@@ -72,7 +72,8 @@ pip install -e .
 ```
 
 Requires Python >= 3.10. Zero runtime dependencies — everything eggswap
-does at runtime is Python's standard library.
+does at runtime is Python's standard library. The fenced lease store uses
+POSIX file locks; the supported and CI-covered platforms are Linux and macOS.
 
 ## Commands
 
@@ -82,7 +83,14 @@ eggswap status    # one-line summary of which profiles are schedulable
 eggswap select    # print the chosen profile for the next unit of work; does not launch it
 eggswap run       # bind a process to the selected profile's account and launch it
 eggswap clear     # release a quarantine by hand after fixing what caused it
+eggswap disable <profile-key>  # persistently exclude one discovered profile
+eggswap enable <profile-key>   # explicitly allow it again
 ```
+
+`disable` persists an operator veto in the local Eggswap state directory;
+adapter rediscovery cannot clear it. `enable` is the explicit re-enable
+operation. Disabling a profile prevents new leases but lets an already-held
+process settle and release its current lease.
 
 ### Asking why
 
@@ -145,7 +153,10 @@ launches anything and releases it when the child exits; a second `run`
 against a held account refuses with exit code 10 and names the holder rather
 than starting a second process. An expired hold is reaped automatically, so a
 crashed run does not fence an account off until someone deletes a lock file
-by hand. `status` lists held accounts separately from schedulable ones.
+by hand. Long-running children renew their lease periodically; if renewal
+fails because the fence expired or was replaced, Eggswap stops the child
+process group and refuses the run. `status` lists held accounts separately
+from schedulable ones.
 
 This was wired late: an audit of this very README found that the guarantee
 was described here and never taken in the CLI, which is recorded in
@@ -172,17 +183,18 @@ eggswap explicitly does **not**:
 the account's own session state and rendered with the honesty contract
 above.
 
-**Codex does not have a live capacity signal yet.** A bounded static probe
-(`docs/research/eggswap/codex-ratelimits-probe.md`) confirmed the installed
-`codex` binary supports an `account/rateLimits/read` JSON-RPC method and
-recovered the *names* of its response fields (`RateLimitSnapshot`,
-`RateLimitWindow`, etc.) from the binary's string table — but no live call
-was made, so there is no observed `usedPercent`, window, or reset time from
-a real response, only evidence that the fields exist in the shipped
-protocol. Until that live call is made and wired in, eggswap reports Codex
-profiles as `Unknown` rather than implying it has read their quota. Treat
-any current display of Codex capacity as provenance-labeled speculation, not
-parity with the Claude side.
+**Codex has a live, bounded capacity reader, with narrower evidence than the
+Claude adapter.** The default CLI starts a private `codex app-server` child
+for each profile read, requests `account/rateLimits/read`, stamps observation
+time when the reply arrives, and terminates the child. Missing, malformed, or
+stale data remains `Unknown`. A redacted live sample on Codex CLI 0.156.1
+observed one `codex` primary bucket with a seven-day window and no secondary
+window; that is evidence for one account and one populated bucket, not proof
+of every plan's bucket layout. The separate `account/rateLimits/updated`
+push has not been observed, so Eggswap currently polls the read method rather
+than relying on push updates. See `docs/codex-ratelimits-live.md` and
+`docs/codex-ratelimit-multibucket.md` for the measured sample, protocol
+limits, and implementation details.
 
 ## License
 

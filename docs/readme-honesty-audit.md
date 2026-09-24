@@ -1,4 +1,9 @@
-# eggswap README honesty audit
+# eggswap README honesty audit — historical snapshot
+
+> This audit predates the current fenced CLI lease and Codex app-server
+> capacity reader. Its row grades and proposed edits are not claims about
+> the current checkout; verify current behavior against `eggswap/`, `tests/`,
+> and the current README.
 
 Scope: `eggswap/README.md` (85 lines) checked line-by-line against
 `eggswap/core/types.py`, `eggswap/core/select.py`, `eggswap/core/store.py`,

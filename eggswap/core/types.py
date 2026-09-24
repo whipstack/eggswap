@@ -57,6 +57,7 @@ __all__ = [
     "SelectionError",
     "NoCapacity",
     "LeaseError",
+    "ProfileDisabled",
     "StaleFence",
     "UNKNOWN_IS_NOT_ZERO",
 ]
@@ -345,6 +346,10 @@ class NoCapacity(SelectionError):
 
 class LeaseError(RuntimeError):
     """Base class for lease failures."""
+
+
+class ProfileDisabled(LeaseError):
+    """Operator or adapter policy disabled this profile for new work."""
 
 
 class StaleFence(LeaseError):

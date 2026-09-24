@@ -112,20 +112,23 @@ class CliReportsUnreadableProvidersTests(unittest.TestCase):
 
     def test_list_says_the_account_list_is_unreadable(self):
         out = _Out()
-        cli.main(["list"], adapters=[self._adapter()], out=out, now=1000.0, store=False)
+        cli.main(["list"], adapters=[self._adapter()], out=out, now=1000.0,
+                 store=False, quarantine=False)
         self.assertIn("UNKNOWN", out.text)
         self.assertIn("account list unreadable", out.text)
 
     def test_status_says_it_too(self):
         out = _Out()
-        rc = cli.main(["status"], adapters=[self._adapter()], out=out, now=1000.0, store=False)
+        rc = cli.main(["status"], adapters=[self._adapter()], out=out, now=1000.0,
+                      store=False, quarantine=False)
         self.assertIn("account list unreadable", out.text)
         self.assertEqual(rc, 3, "nothing schedulable must still exit 3")
 
     def test_a_healthy_provider_produces_no_warning(self):
         good = ClaudeCswapAdapter(runner=lambda *x, **k: _R(0, GOOD))
         out = _Out()
-        cli.main(["list"], adapters=[good], out=out, now=1_790_000_000.0, store=False)
+        cli.main(["list"], adapters=[good], out=out, now=1_790_000_000.0,
+                 store=False, quarantine=False)
         self.assertNotIn("unreadable", out.text,
                          "a working provider must not be warned about")
 

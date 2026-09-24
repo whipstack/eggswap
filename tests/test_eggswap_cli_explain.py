@@ -71,7 +71,10 @@ class ExplainReachesTheRecordTests(unittest.TestCase):
 
     def _run(self, argv):
         out = _Out()
-        rc = cli.main(argv, adapters=[self.adapter], out=out, now=NOW, store=False)
+        rc = cli.main(
+            argv, adapters=[self.adapter], out=out, now=NOW,
+            store=False, quarantine=False,
+        )
         return rc, out.text
 
     def test_plain_select_is_unchanged_by_all_of_this(self):

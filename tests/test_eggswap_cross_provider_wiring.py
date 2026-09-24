@@ -144,7 +144,10 @@ class CliFlagReachesTheStrategyTests(unittest.TestCase):
         from eggswap import cli
 
         out = self._Out()
-        cli.main(argv, adapters=[self._Adapter(self.rows)], out=out, now=NOW, store=False)
+        cli.main(
+            argv, adapters=[self._Adapter(self.rows)], out=out, now=NOW,
+            store=False, quarantine=False,
+        )
         return out.text.strip()
 
     def test_the_flag_changes_the_answer(self):
@@ -165,4 +168,4 @@ class CliFlagReachesTheStrategyTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             cli.main(["select", "--cross-provider", "nonsense"],
                      adapters=[self._Adapter(self.rows)], out=self._Out(),
-                     now=NOW, store=False)
+                     now=NOW, store=False, quarantine=False)

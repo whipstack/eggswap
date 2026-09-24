@@ -53,7 +53,7 @@ class FakeAdapter:
 
 def _run(argv, adapters, *, now=NOW):
     out = io.StringIO()
-    code = main(argv, adapters=adapters, out=out, now=now)
+    code = main(argv, adapters=adapters, out=out, now=now, store=False, quarantine=False)
     return code, out.getvalue()
 
 

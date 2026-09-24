@@ -315,6 +315,15 @@ class AvailabilityTests(unittest.TestCase):
                 self.assertIsInstance(availability, Unknown)
                 self.assertFalse(availability.schedulable)
 
+    def test_malformed_scoped_percentage_maps_to_unknown(self):
+        for index, pct in enumerate(("not-a-number", float("nan"), float("inf"), 101, -1, True)):
+            with self.subTest(case=index):
+                availability = self._adapter(
+                    result=self._custom_usage_result(scoped=[{"name": "Fable", "pct": pct}])
+                ).availability(Profile(provider=Provider.CLAUDE, account_id="9"))
+                self.assertIsInstance(availability, Unknown)
+                self.assertFalse(availability.schedulable)
+
     def test_subprocess_failure_is_unknown(self):
         adapter = self._adapter(runner=_raising_runner(OSError("cswap not found")))
         profile = Profile(provider=Provider.CLAUDE, account_id="4")
