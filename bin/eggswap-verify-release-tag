@@ -3,15 +3,35 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 
+def _package_version() -> str:
+    """Read the scalar version under the top-level TOML [project] table.
+
+    Keep the release guard usable on Python 3.10, which the package supports
+    but which does not include tomllib.
+    """
+    in_project = False
+    for line in Path("pyproject.toml").read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped == "[project]":
+            in_project = True
+            continue
+        if stripped.startswith("["):
+            in_project = False
+        if in_project:
+            match = re.fullmatch(r"\s*version\s*=\s*['\"]([^'\"]+)['\"]\s*(?:#.*)?", line)
+            if match:
+                return match.group(1)
+    raise ValueError("pyproject.toml has no scalar version in [project]")
+
+
 def verify_release_tag(tag: str, event_sha: str, repository_url: str) -> str:
-    metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-    version = metadata["project"]["version"]
+    version = _package_version()
     expected_tag = f"v{version}"
     if tag != expected_tag:
         raise ValueError(f"release tag {tag!r} does not match package version {expected_tag!r}")

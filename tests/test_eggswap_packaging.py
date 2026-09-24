@@ -257,7 +257,7 @@ class TheReleaseWorkflowIsVersionGatedTests(unittest.TestCase):
 
     def test_only_version_tags_trigger_a_release(self):
         self.assertIn('tags: ["v*"]', self.text)
-        repo_root = EGGSWAP_DIR.parent if EGGSWAP_DIR.name == "eggswap" else EGGSWAP_DIR
+        repo_root = EGGSWAP_DIR
         verifier = (repo_root / "bin" / "eggswap-verify-release-tag").read_text(encoding="utf-8")
         self.assertIn('expected_tag = f"v{version}"', verifier)
         self.assertIn('if tag != expected_tag:', verifier)
