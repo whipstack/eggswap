@@ -294,5 +294,23 @@ class TheReleaseWorkflowIsVersionGatedTests(unittest.TestCase):
 
     def test_write_permission_is_scoped_to_the_release_job(self):
         self.assertIn("permissions:\n  contents: read", self.text)
-        self.assertIn("jobs:\n  release:", self.text)
+        self.assertIn("  release:\n    name: Build and publish GitHub release assets", self.text)
         self.assertIn("    permissions:\n      contents: write", self.text)
+
+    def test_release_waits_for_the_reusable_platform_matrix(self):
+        self.assertIn("  matrix:\n    name: Require the complete supported-platform matrix", self.text)
+        self.assertIn("    needs: verify-tag\n    uses: ./.github/workflows/ci.yml", self.text)
+        self.assertIn("    needs: [verify-tag, matrix]", self.text)
+        ci = (EGGSWAP_DIR / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("  workflow_call:", ci)
+        self.assertNotIn('tags: ["v*"]', ci)
+        self.assertIn('python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]', ci)
+        self.assertIn("os: [ubuntu-latest, macos-latest]", ci)
+
+    def test_tag_target_is_rechecked_after_build_before_release_effects(self):
+        build = self.text.index("- name: Build wheel and source distribution")
+        recheck = self.text.index("- name: Recheck tag target immediately before publishing")
+        publish = self.text.index("- name: Create GitHub Release and attach verified distributions")
+        self.assertLess(build, recheck)
+        self.assertLess(recheck, publish)
+        self.assertEqual(self.text.count("run: python bin/eggswap-verify-release-tag"), 2)
