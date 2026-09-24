@@ -1,0 +1,157 @@
+"""Interactive-login wiring, with fake provider CLIs and disposable homes."""
+from __future__ import annotations
+
+import io
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+from eggswap import cli
+from eggswap.core.codex_homes import enroll_codex_home, enrolled_codex_homes, exclusive_login
+
+
+def _fake_auth(home: Path, account_id: str) -> None:
+    (home / "auth.json").write_text(json.dumps({
+        "auth_mode": "chatgpt", "tokens": {"account_id": account_id},
+    }), encoding="utf-8")
+
+
+class LoginTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.state = self.root / "state"
+        self.env = mock.patch.dict(os.environ, {
+            "EGGSWAP_STATE_DIR": str(self.state),
+            "EGGSWAP_CODEX_HOMES": "",
+            "CODEX_HOME": "",
+            "CLAUDE_CONFIG_DIR": "",
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def _main(self, argv, runner):
+        output = io.StringIO()
+        rc = cli.main(argv, out=output, runner=runner)
+        return rc, output.getvalue()
+
+    def test_codex_login_uses_selected_home_and_enrolls_only_after_success(self):
+        home = self.root / "codex-2"
+        calls = []
+
+        def runner(argv, *, env):
+            calls.append((argv, env["CODEX_HOME"]))
+            if argv == ["codex", "login"]:
+                _fake_auth(home, "second-account")
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch("eggswap.cli._default_codex_homes", return_value=[]):
+            rc, output = self._main(["login", "codex", "--home", str(home)], runner)
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(calls, [
+            (["codex", "login"], str(home.resolve())),
+            (["codex", "login", "status"], str(home.resolve())),
+        ])
+        self.assertEqual((home / "config.toml").read_text(),
+                         'cli_auth_credentials_store = "file"\n')
+        self.assertEqual(enrolled_codex_homes(), [home.resolve()])
+        self.assertIn("codex:second-account", output)
+        with mock.patch("eggswap.cli.Path.home", return_value=self.root / "no-default"):
+            self.assertIn(home.resolve(), cli._default_codex_homes())
+
+    def test_failed_codex_login_does_not_enroll(self):
+        home = self.root / "codex-2"
+
+        def runner(argv, *, env):
+            return SimpleNamespace(returncode=1)
+
+        with mock.patch("eggswap.cli._default_codex_homes", return_value=[]):
+            rc, _ = self._main(["login", "codex", "--home", str(home)], runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(enrolled_codex_homes(), [])
+
+    def test_duplicate_codex_identity_is_refused(self):
+        first = self.root / "codex-1"
+        first.mkdir()
+        _fake_auth(first, "same-account")
+        home = self.root / "codex-2"
+
+        def runner(argv, *, env):
+            if argv == ["codex", "login"]:
+                _fake_auth(home, "same-account")
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch("eggswap.cli._default_codex_homes", return_value=[first]):
+            rc, output = self._main(["login", "codex", "--home", str(home)], runner)
+        self.assertEqual(rc, 3)
+        self.assertIn("already present", output)
+        self.assertEqual(enrolled_codex_homes(), [])
+
+    def test_existing_non_file_store_is_refused_before_login(self):
+        home = self.root / "codex-2"
+        home.mkdir(mode=0o700)
+        (home / "config.toml").write_text('cli_auth_credentials_store = "keyring"\n')
+        runner = mock.Mock()
+        rc, output = self._main(["login", "codex", "--home", str(home)], runner)
+        self.assertEqual(rc, 2)
+        self.assertIn("file", output)
+        runner.assert_not_called()
+
+    def test_existing_auth_is_not_overwritten(self):
+        home = self.root / "codex-2"
+        home.mkdir(mode=0o700)
+        _fake_auth(home, "existing")
+        before = (home / "auth.json").read_bytes()
+        runner = mock.Mock()
+        rc, output = self._main(["login", "codex", "--home", str(home)], runner)
+        self.assertEqual(rc, 2)
+        self.assertIn("fresh home", output)
+        self.assertEqual((home / "auth.json").read_bytes(), before)
+        runner.assert_not_called()
+
+    def test_second_concurrent_login_is_refused(self):
+        home = self.root / "codex-2"
+        home.mkdir(mode=0o700)
+        with exclusive_login(home):
+            runner = mock.Mock()
+            rc, output = self._main(["login", "codex", "--home", str(home)], runner)
+        self.assertEqual(rc, 2)
+        self.assertIn("already active", output)
+        runner.assert_not_called()
+
+    def test_claude_login_delegates_to_native_cli_then_cswap(self):
+        calls = []
+
+        def runner(argv, *, env):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0)
+
+        rc, output = self._main(["login", "claude"], runner)
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(calls, [["claude", "auth", "login"], ["cswap", "add"]])
+
+    def test_claude_login_refuses_session_home_before_mutation(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.root / "session")}):
+            runner = mock.Mock()
+            rc, output = self._main(["login", "claude"], runner)
+        self.assertEqual(rc, 2)
+        self.assertIn("unset CLAUDE_CONFIG_DIR", output)
+        runner.assert_not_called()
+
+    def test_unreadable_catalog_refuses_instead_of_hiding_enrollment(self):
+        self.state.mkdir()
+        (self.state / "codex_homes.json").write_text("{broken")
+        with self.assertRaises(ValueError):
+            enrolled_codex_homes()
+
+    def test_catalog_add_is_idempotent(self):
+        home = self.root / "codex-2"
+        home.mkdir()
+        enroll_codex_home(home)
+        enroll_codex_home(home)
+        self.assertEqual(enrolled_codex_homes(), [home.resolve()])
