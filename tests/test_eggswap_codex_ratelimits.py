@@ -108,7 +108,87 @@ def _profile() -> Profile:
     return Profile(provider=Provider.CODEX, account_id="acct-1", metadata={"codex_home": "/tmp/codex-home"})
 
 
+def _multi_home_profile() -> Profile:
+    return Profile(provider=Provider.CODEX, account_id="acct-1", metadata={
+        "codex_home": "/tmp/codex-home", "codex_home_count": 2,
+    })
+
+
+def _store_reply_lines(*, effective="file", managed=None):
+    requirements = {
+        "requirements": None if managed is None else {
+            "cliAuthCredentialsStore": managed,
+        }
+    }
+    config = {"config": {"cli_auth_credentials_store": effective}, "origins": {}}
+    rate = json.loads(_RATE_LIMITS_REPLY)
+    rate["id"] = 4
+    return [
+        _INIT_REPLY,
+        json.dumps({"id": 2, "result": requirements}),
+        json.dumps({"id": 3, "result": config}),
+        json.dumps(rate),
+    ]
+
+
 class HappyPathTest(unittest.TestCase):
+    def test_multiple_homes_require_effective_file_store_and_then_read_capacity(self):
+        proc = _FakeProcess(_store_reply_lines(effective="file"))
+        reader = AppServerRateLimitReader(
+            codex_home=Path("/unused"), spawn=lambda *a, **k: proc, clock=lambda: 42.0
+        )
+
+        result = reader(_multi_home_profile())
+
+        self.assertIsInstance(result, Available)
+        requests = [json.loads(line) for line in proc.stdin.writes]
+        self.assertEqual(
+            [request.get("method") for request in requests],
+            [
+                "initialize", "initialized", "configRequirements/read", "config/read",
+                "account/rateLimits/read",
+            ],
+        )
+        self.assertTrue(proc.kill_called)
+
+    def test_managed_store_override_beats_local_effective_config(self):
+        proc = _FakeProcess(_store_reply_lines(effective="file", managed="keyring"))
+        reader = AppServerRateLimitReader(
+            codex_home=Path("/unused"), spawn=lambda *a, **k: proc, clock=lambda: 42.0
+        )
+
+        result = reader(_multi_home_profile())
+
+        self.assertIsInstance(result, Unknown)
+        self.assertIn("observed keyring", result.reason)
+        self.assertEqual(len(proc.stdin.writes), 4)  # no quota request was made
+
+    def test_unknown_or_missing_effective_store_blocks_multiple_homes(self):
+        for effective in (None, "unknown", "auto", "ephemeral", "keyring", {"bad": "shape"}):
+            with self.subTest(effective=effective):
+                proc = _FakeProcess(_store_reply_lines(effective=effective))
+                reader = AppServerRateLimitReader(
+                    codex_home=Path("/unused"), spawn=lambda *a, **k: proc, clock=lambda: 42.0
+                )
+                result = reader(_multi_home_profile())
+                self.assertIsInstance(result, Unknown)
+                self.assertNotIn("account/rateLimits/read", [
+                    json.loads(line).get("method") for line in proc.stdin.writes
+                ])
+
+    def test_single_home_does_not_need_store_policy_rpc(self):
+        proc = _FakeProcess([_INIT_REPLY, _RATE_LIMITS_REPLY])
+        reader = AppServerRateLimitReader(
+            codex_home=Path("/unused"), spawn=lambda *a, **k: proc, clock=lambda: 42.0
+        )
+
+        result = reader(_profile())
+
+        self.assertIsInstance(result, Available)
+        self.assertEqual([json.loads(line).get("method") for line in proc.stdin.writes], [
+            "initialize", "initialized", "account/rateLimits/read",
+        ])
+
     def test_produces_available_with_converted_window_and_stamped_observed_at(self) -> None:
         proc = _FakeProcess([_INIT_REPLY, _UNSOLICITED_NOTIFICATION, _RATE_LIMITS_REPLY])
         clock_values = iter([100.0, 200.0, 300.0])

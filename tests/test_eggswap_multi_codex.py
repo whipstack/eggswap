@@ -290,9 +290,10 @@ class CredentialStoreModeTests(unittest.TestCase):
     accounts, and a tool that assumes otherwise will cheerfully "rotate"
     between two views of ONE account.
 
-    eggswap cannot fix that, but it must not hide it: the store mode is
-    measured per profile and reported, and "unknown" is never quietly upgraded
-    to "isolated".
+    eggswap cannot fix that, but it must not hide it: profile metadata keeps a
+    local declaration as a hint only, while multi-home scheduling requires
+    app-server's effective config and managed requirements to prove file mode.
+    Missing or ambiguous policy is never quietly upgraded to "isolated".
     """
 
     def setUp(self):
@@ -324,11 +325,11 @@ class CredentialStoreModeTests(unittest.TestCase):
         adapter = CodexHomeAdapter([home])
         profiles = adapter.profiles()
         self.assertEqual(len(profiles), 1)
-        return profiles[0].metadata["credentials_store"]
+        return profiles[0].metadata["declared_credentials_store"]
 
-    def test_tokens_present_and_no_config_reads_as_file(self):
+    def test_tokens_without_local_declaration_do_not_claim_effective_store(self):
         home = self._home("a", auth=self._full_auth("acct-file"))
-        self.assertEqual(self._store_of(home), "file")
+        self.assertEqual(self._store_of(home), "unknown")
 
     def test_declared_store_fallback_without_tomllib(self):
         home = self._home(
@@ -347,19 +348,13 @@ class CredentialStoreModeTests(unittest.TestCase):
         )
         self.assertEqual(self._store_of(home), "keyring")
 
-    def test_declared_file_but_no_tokens_is_unknown_not_file(self):
-        """Observable state beats the declared setting.
-
-        A config that SAYS file while auth.json carries no tokens is not a
-        file-backed store; calling it one would manufacture exactly the
-        isolation guarantee this test exists to withhold.
-        """
+    def test_declared_file_is_only_a_local_hint(self):
         home = self._home(
             "c",
             auth={"auth_mode": "chatgpt", "tokens": {"account_id": "acct-empty"}},
             config='cli_auth_credentials_store = "file"\n',
         )
-        self.assertEqual(self._store_of(home), "unknown")
+        self.assertEqual(self._store_of(home), "file")
 
     def test_ephemeral_and_auto_are_reported_verbatim(self):
         for mode in ("ephemeral", "auto"):
@@ -370,3 +365,9 @@ class CredentialStoreModeTests(unittest.TestCase):
                     config=f'cli_auth_credentials_store = "{mode}"\n',
                 )
                 self.assertEqual(self._store_of(home), mode)
+
+    def test_profiles_report_home_count_for_runtime_isolation_gate(self):
+        a = self._home("count-a", auth=self._full_auth("acct-a"))
+        b = self._home("count-b", auth=self._full_auth("acct-b"))
+        profiles = CodexHomeAdapter([a, b]).profiles()
+        self.assertEqual([p.metadata["codex_home_count"] for p in profiles], [2, 2])

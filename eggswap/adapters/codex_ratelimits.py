@@ -183,6 +183,10 @@ class AppServerRateLimitReader:
 
     def __call__(self, profile: Profile, *, model: Optional[str] = None) -> Availability:
         codex_home = (profile.metadata or {}).get("codex_home") or str(self._codex_home)
+        try:
+            home_count = int((profile.metadata or {}).get("codex_home_count", 1))
+        except (TypeError, ValueError):
+            home_count = 0
 
         proc = None
         try:
@@ -211,8 +215,28 @@ class AppServerRateLimitReader:
                         f"initialize failed: {init_reply.get('error', init_reply)}"
                     )
                 self._write(proc, {"method": "initialized", "params": {}})
-                self._write(proc, {"id": 2, "method": "account/rateLimits/read", "params": {}})
-                reply = self._await_reply(reader, expected_id=2, deadline=deadline)
+                rate_id = 2
+                if home_count > 1:
+                    store_mode = self._effective_store_mode(proc, reader, deadline)
+                    if store_mode != "file":
+                        return Unknown(
+                            stale_since=self._clock(),
+                            reason=(
+                                "multiple CODEX_HOME profiles require an explicitly "
+                                f"verified effective file credential store; observed {store_mode}"
+                            ),
+                        )
+                    rate_id = 4
+                elif home_count != 1:
+                    return Unknown(
+                        stale_since=self._clock(),
+                        reason="invalid configured CODEX_HOME count",
+                    )
+                self._write(
+                    proc,
+                    {"id": rate_id, "method": "account/rateLimits/read", "params": {}},
+                )
+                reply = self._await_reply(reader, expected_id=rate_id, deadline=deadline)
             except _Timeout as exc:
                 return Unknown(stale_since=self._clock(), reason=str(exc))
             except _BadJSON as exc:
@@ -237,6 +261,48 @@ class AppServerRateLimitReader:
         finally:
             if proc is not None:
                 self._kill(proc)
+
+    def _effective_store_mode(self, proc: Any, reader: _LineReader, deadline: float) -> str:
+        """Read effective and managed store policy from this Codex app-server.
+
+        A local config.toml or the presence of auth.json tokens cannot prove
+        the effective backend: managed requirements can override local config.
+        Requiring both read-only RPCs to succeed makes missing/old protocols
+        fail closed for multi-home scheduling.
+        """
+        self._write(proc, {"id": 2, "method": "configRequirements/read", "params": {}})
+        requirements_reply = self._await_reply(reader, expected_id=2, deadline=deadline)
+        requirements_result = requirements_reply.get("result")
+        if not isinstance(requirements_result, dict) or "requirements" not in requirements_result:
+            return "unknown"
+        requirements = requirements_result.get("requirements")
+        if requirements is not None and not isinstance(requirements, dict):
+            return "unknown"
+
+        self._write(proc, {"id": 3, "method": "config/read", "params": {"includeLayers": True}})
+        config_reply = self._await_reply(reader, expected_id=3, deadline=deadline)
+        config_result = config_reply.get("result")
+        config = config_result.get("config") if isinstance(config_result, dict) else None
+        if not isinstance(config, dict):
+            return "unknown"
+
+        # Managed requirements are the higher-precedence source. Otherwise
+        # config/read supplies the effective layered value. Missing or
+        # malformed fields remain unknown; token presence is not evidence.
+        if isinstance(requirements, dict):
+            managed = requirements.get("cliAuthCredentialsStore")
+            if managed is not None:
+                modes = {"file", "keyring", "auto", "ephemeral"}
+                return managed if isinstance(managed, str) and managed in modes else "unknown"
+        additional = config.get("additional")
+        if isinstance(additional, dict):
+            value = additional.get("cli_auth_credentials_store")
+            if value is None:
+                value = additional.get("cliAuthCredentialsStore")
+        else:
+            value = config.get("cli_auth_credentials_store", config.get("cliAuthCredentialsStore"))
+        modes = {"file", "keyring", "auto", "ephemeral"}
+        return value if isinstance(value, str) and value in modes else "unknown"
 
     def apply_notification(
         self, notification: dict, *, model: Optional[str] = None

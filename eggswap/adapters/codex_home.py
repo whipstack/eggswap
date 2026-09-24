@@ -17,12 +17,15 @@ admin policy can override the config. The binary carries a keyring code path
 (`failed to write OAuth tokens to keyring` is in the shipped 0.156.1 binary),
 so on a keyring-backed install the credential does NOT live under CODEX_HOME
 and two CODEX_HOME directories are not, by themselves, two isolated accounts.
-Separate directories are proof of isolation only where the store is
-file-backed, which is what `store_mode()` below reports per profile.
+Separate directories are proof of isolation only where the effective store is
+file-backed. Local files cannot establish that because managed policy can
+override them; the runtime reader checks app-server's effective config before
+allowing more than one home to schedule work.
 
-Measured on the machine this was built against: no `cli_auth_credentials_store`
-in config.toml, and auth.json carries all four token fields non-empty, so the
-effective store is file.
+An `auth.json` token set only shows what is visible in this home; it does not
+prove which backend the running CLI uses. A local declaration is retained as
+a diagnostic hint, while multi-home scheduling uses app-server's effective
+configuration and managed requirements.
 
 The keyring case has since been NARROWED, and it got worse rather than better
 (docs/research/eggswap/codex-keyring-namespacing.md). The keyring SERVICE name
@@ -92,7 +95,7 @@ def _read_auth_json(path: Path) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-def _declared_store_mode(config: Path) -> Optional[str]:
+def _read_declared_store_config(config: Path) -> Optional[str]:
     """Read the credential-store setting on Python versions without tomllib.
 
     The package supports Python 3.10, which predates stdlib tomllib. Falling
@@ -131,27 +134,13 @@ def _declared_store_mode(config: Path) -> Optional[str]:
         return None
 
 
-def _store_mode(home: Path) -> str:
-    """Where this home's credential actually lives, as far as we can tell.
-
-    "file" only when auth.json really carries the token fields: a config that
-    SAYS file while auth.json holds no tokens is not a file-backed store, and
-    the observable state wins over the declared one. Anything else is reported
-    verbatim or as "unknown" -- never silently treated as isolated.
-    """
-    declared = None
+def _declared_store_hint(home: Path) -> str:
+    """Return a local config hint, never an effective-policy claim."""
     config = home / "config.toml"
     if config.is_file():
-        declared = _declared_store_mode(config)
-    if declared and str(declared) != "file":
-        return str(declared)
-    auth = home / "auth.json"
-    try:
-        tokens = json.loads(auth.read_text()).get("tokens") or {}
-    except Exception:
-        return "unknown"
-    if isinstance(tokens, dict) and tokens.get("access_token") and tokens.get("refresh_token"):
-        return "file"
+        declared = _read_declared_store_config(config)
+        if isinstance(declared, str) and declared in {"file", "keyring", "auto", "ephemeral"}:
+            return declared
     return "unknown"
 
 
@@ -213,7 +202,8 @@ class CodexHomeAdapter:
                     is_api_key=is_api_key,
                     metadata={
                         "codex_home": str(home),
-                        "credentials_store": _store_mode(home),
+                        "declared_credentials_store": _declared_store_hint(home),
+                        "codex_home_count": len({str(path.resolve()) for path in self._homes}),
                     },
                 )
             )

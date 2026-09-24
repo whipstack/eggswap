@@ -25,10 +25,11 @@ against. But Codex supports `cli_auth_credentials_store` = `file` |
 `keyring` | `auto` | `ephemeral`, and an admin policy can override your
 config. On a keyring-backed install the credential does not live under
 `CODEX_HOME`, so two directories are two views of possibly one account.
-eggswap measures the store per profile and reports it in the profile's
-metadata rather than assuming isolation: a home whose `auth.json` carries no
-tokens reads as `unknown`, never as `file`, even if the config claims
-otherwise.
+Profile metadata reports the local config declaration as a hint only. With
+multiple homes, eggswap checks app-server's effective config and managed
+requirements before scheduling; it returns `Unknown` unless both establish
+the `file` store. A local `auth.json` token set or config declaration alone
+does not prove isolation.
 
 And the keyring case looks actively risky rather than merely untested. The
 keyring **service** name in the shipped binary is the constant `"codex"`, with
