@@ -114,6 +114,7 @@ class LoginTests(unittest.TestCase):
                          'cli_auth_credentials_store = "file"\n')
         self.assertEqual(enrolled_codex_homes(), [home.resolve()])
         self.assertIn("codex:second-account", output)
+        self.assertIn("Opening Codex sign-in", output)
         with mock.patch("eggswap.cli.Path.home", return_value=self.root / "no-default"):
             self.assertIn(home.resolve(), cli._default_codex_homes())
 
@@ -124,9 +125,10 @@ class LoginTests(unittest.TestCase):
             return SimpleNamespace(returncode=1)
 
         with mock.patch("eggswap.cli._default_codex_homes", return_value=[]):
-            rc, _ = self._main(["add", "--codex", "--home", str(home)], runner)
+            rc, output = self._main(["add", "--codex", "--home", str(home)], runner)
         self.assertEqual(rc, 1)
         self.assertEqual(enrolled_codex_homes(), [])
+        self.assertIn("was not enrolled", output)
 
     def test_duplicate_codex_identity_is_refused(self):
         first = self.root / "codex-1"
@@ -143,6 +145,7 @@ class LoginTests(unittest.TestCase):
             rc, output = self._main(["add", "--codex", "--home", str(home)], runner)
         self.assertEqual(rc, 3)
         self.assertIn("already present", output)
+        self.assertIn(str(home.resolve()), output)
         self.assertEqual(enrolled_codex_homes(), [])
 
     def test_existing_non_file_store_is_refused_before_login(self):
@@ -200,6 +203,7 @@ class LoginTests(unittest.TestCase):
                                  ["cswap", "add"],
                                  ["cswap", "status", "--json"]])
         self.assertIn("claude:1", output)
+        self.assertIn("Opening Claude sign-in", output)
 
     def test_claude_refresh_names_quarantined_slot_without_clearing(self):
         quarantine = Quarantine()

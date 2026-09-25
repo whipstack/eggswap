@@ -729,8 +729,12 @@ def _cmd_login(args, *, runner, out, quarantine=None) -> int:
             return 2
         try:
             env = _clean_provider_env("claude")
+            print("Opening Claude sign-in; choose the account to add in your browser.",
+                  file=out, flush=True)
             login = runner(["claude", "auth", "login"], env=env)
             if login.returncode:
+                print(f"eggswap add --claude: sign-in failed (exit {login.returncode}); "
+                      "no account was captured by cswap", file=out)
                 return login.returncode
             expected_identity = None
             try:
@@ -821,8 +825,12 @@ def _cmd_login(args, *, runner, out, quarantine=None) -> int:
             env = _clean_provider_env("codex")
             env["CODEX_HOME"] = str(home)
             argv = ["codex", "login"] + (["--device-auth"] if args.device_auth else [])
+            print(f"Opening Codex sign-in for {home}; choose the account to add "
+                  "in your browser.", file=out, flush=True)
             login = runner(argv, env=env)
             if login.returncode:
+                print(f"eggswap add --codex: sign-in failed (exit {login.returncode}); "
+                      f"{home} was not enrolled", file=out)
                 return login.returncode
             status = runner(["codex", "login", "status"], env=env)
             if status.returncode:
@@ -834,7 +842,9 @@ def _cmd_login(args, *, runner, out, quarantine=None) -> int:
                 return 3
             profile = profiles[0]
             if profile.account_id in existing_ids:
-                print("eggswap add --codex: this account is already present in another CODEX_HOME", file=out)
+                print("eggswap add --codex: this account is already present in another "
+                      f"CODEX_HOME; {home} was not enrolled. Sign in with a "
+                      "different account on the next add", file=out)
                 return 3
             enroll_codex_home(home)
     except (OSError, ValueError) as exc:
