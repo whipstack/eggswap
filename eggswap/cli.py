@@ -581,18 +581,19 @@ def _cmd_run(
 
     pre_launch_auth_dead = isinstance(availability, AuthDead)
 
+    base_env = _clean_provider_env(profile.provider.value)
     if profile.provider is Provider.CLAUDE:
         argv = adapter.launch_argv(profile, child_args)
         env: dict = {}
     else:
-        env = adapter.launch_env(profile, dict(os.environ))
+        env = adapter.launch_env(profile, base_env)
         argv = child_args
 
     if dry_run:
         print(json.dumps({"argv": argv, "env": {"CODEX_HOME": env["CODEX_HOME"]} if "CODEX_HOME" in env else {}}), file=out)
         return 0
 
-    full_env = dict(os.environ)
+    full_env = base_env
     full_env.update(env)
 
     # The exclusive hold. Two Claude CLIs on one account's HOME concurrently
@@ -703,8 +704,8 @@ def _cmd_profile_enabled(adapters, profile_key: str, *, enabled: bool, store, ou
     return 0
 
 
-def _subscription_login_env(provider: str) -> dict[str, str]:
-    """Keep ambient credentials from overriding interactive account selection."""
+def _clean_provider_env(provider: str) -> dict[str, str]:
+    """Keep ambient credentials from overriding the selected account."""
     prefixes = ("ANTHROPIC_", "CLAUDE_") if provider == "claude" else ("OPENAI_", "CODEX_")
     return {name: value for name, value in os.environ.items()
             if not name.startswith(prefixes)}
@@ -724,7 +725,7 @@ def _cmd_login(args, *, runner, out) -> int:
             print("eggswap add --claude: unset CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR; cswap add captures the default login", file=out)
             return 2
         try:
-            env = _subscription_login_env("claude")
+            env = _clean_provider_env("claude")
             login = runner(["claude", "auth", "login"], env=env)
             if login.returncode:
                 return login.returncode
@@ -770,7 +771,7 @@ def _cmd_login(args, *, runner, out) -> int:
                 raise ValueError("auth.json already exists; choose a fresh home for a new account")
             existing_homes = [path.resolve() for path in _default_codex_homes() if path.resolve() != home]
             existing_ids = {profile.account_id for profile in CodexHomeAdapter(existing_homes).profiles()}
-            env = _subscription_login_env("codex")
+            env = _clean_provider_env("codex")
             env["CODEX_HOME"] = str(home)
             argv = ["codex", "login"] + (["--device-auth"] if args.device_auth else [])
             login = runner(argv, env=env)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -173,6 +174,55 @@ class DryRunTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["argv"], ["codex", "exec", "hi"])
         self.assertEqual(payload["env"]["CODEX_HOME"], "/fake/codex-home/acct-9")
+
+
+class RunEnvironmentTests(unittest.TestCase):
+    def test_claude_run_does_not_inherit_paid_or_other_account_credentials(self):
+        profile = Profile(provider=Provider.CLAUDE, account_id="2", label="Claude 2")
+        adapter = FakeAdapter(Provider.CLAUDE, [(profile, Available(windows=(), observed_at=NOW))])
+        calls = []
+
+        def runner(argv, *, env):
+            calls.append((argv, env))
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {
+            "ANTHROPIC_API_KEY": "unused", "CLAUDE_CODE_OAUTH_TOKEN": "unused",
+            "SAFE_VALUE": "retained",
+        }, clear=True):
+            output = io.StringIO()
+            code = main(["run", "claude:2", "--", "--version"],
+                        adapters=[adapter], out=output, now=NOW, runner=runner,
+                        store=False, quarantine=False)
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertEqual(calls[0][0], ["cswap", "run", "2", "--", "--version"])
+        self.assertNotIn("ANTHROPIC_API_KEY", calls[0][1])
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", calls[0][1])
+        self.assertEqual(calls[0][1]["SAFE_VALUE"], "retained")
+
+    def test_codex_run_does_not_inherit_other_account_credentials(self):
+        profile = Profile(provider=Provider.CODEX, account_id="acct-9", label="Codex 9")
+        adapter = FakeAdapter(Provider.CODEX, [(profile, Available(windows=(), observed_at=NOW))])
+        calls = []
+
+        def runner(argv, *, env):
+            calls.append((argv, env))
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {
+            "OPENAI_API_KEY": "unused", "CODEX_ACCESS_TOKEN": "unused",
+            "SAFE_VALUE": "retained",
+        }, clear=True):
+            output = io.StringIO()
+            code = main(["run", "codex:acct-9", "--", "codex", "--version"],
+                        adapters=[adapter], out=output, now=NOW, runner=runner,
+                        store=False, quarantine=False)
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertEqual(calls[0][0], ["codex", "--version"])
+        self.assertEqual(calls[0][1]["CODEX_HOME"], "/fake/codex-home/acct-9")
+        self.assertNotIn("OPENAI_API_KEY", calls[0][1])
+        self.assertNotIn("CODEX_ACCESS_TOKEN", calls[0][1])
+        self.assertEqual(calls[0][1]["SAFE_VALUE"], "retained")
 
 
 class ExitCodeTests(unittest.TestCase):
