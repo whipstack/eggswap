@@ -31,6 +31,7 @@ eggswap add --claude
 eggswap add --codex
 eggswap add --codex
 eggswap list
+eggswap status
 ```
 
 Each `add` prints the account key it registered. If `eggswap list` already

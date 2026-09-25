@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -829,8 +830,13 @@ def _cmd_login(args, *, runner, out, quarantine=None) -> int:
                   "in your browser.", file=out, flush=True)
             login = runner(argv, env=env)
             if login.returncode:
+                retry_home = f" --home {shlex.quote(str(home))}" if args.home else ""
+                retry = ("Check the Codex login message and retry the same command"
+                         if args.device_auth else
+                         "If the browser callback failed, retry with "
+                         f"eggswap add --codex{retry_home} --device-auth")
                 print(f"eggswap add --codex: sign-in failed (exit {login.returncode}); "
-                      f"{home} was not enrolled", file=out)
+                      f"{home} was not enrolled. {retry}", file=out)
                 return login.returncode
             status = runner(["codex", "login", "status"], env=env)
             if status.returncode:
@@ -992,6 +998,12 @@ def main(
     quarantine=None,
     quarantine_path: Optional[Path] = None,
 ) -> int:
+    if not argv:
+        print("eggswap: add and run your Claude and Codex accounts", file=out)
+        print("Start: eggswap add  (or eggswap add --claude / --codex)", file=out)
+        print("Then:  eggswap list; eggswap status", file=out)
+        print("Help:  eggswap --help", file=out)
+        return 0
     if argv in (["--version"], ["--help"], ["-h"]):
         _build_parser().parse_args(argv)
     if argv and argv[0] == "add":
