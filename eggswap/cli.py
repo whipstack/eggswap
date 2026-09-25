@@ -878,24 +878,25 @@ def _cmd_add(args, *, runner, out, quarantine=None) -> int:
             args.codex = True
         else:
             print("Add an account: [1] Claude  [2] Codex  [q] Cancel", file=out)
-            try:
-                choice = input("Choose provider [1/2]: ").strip().lower()
-            except KeyboardInterrupt:
-                print("eggswap add: cancelled", file=out)
-                return 130
-            except EOFError:
-                print("eggswap add: cancelled", file=out)
-                return 2
-            if choice in ("1", "claude"):
-                args.claude = True
-            elif choice in ("2", "codex"):
-                args.codex = True
-            elif choice in ("q", "quit"):
-                print("eggswap add: cancelled", file=out)
-                return 0
-            else:
-                print("eggswap add: choose 1 for Claude or 2 for Codex", file=out)
-                return 2
+            while True:
+                try:
+                    choice = input("Choose provider [1/2/q]: ").strip().lower()
+                except KeyboardInterrupt:
+                    print("eggswap add: cancelled", file=out)
+                    return 130
+                except EOFError:
+                    print("eggswap add: cancelled", file=out)
+                    return 2
+                if choice in ("1", "claude"):
+                    args.claude = True
+                    break
+                if choice in ("2", "codex"):
+                    args.codex = True
+                    break
+                if choice in ("q", "quit"):
+                    print("eggswap add: cancelled", file=out)
+                    return 0
+                print("eggswap add: choose 1 for Claude, 2 for Codex, or q to cancel", file=out)
     try:
         home = args.home or (str(_next_codex_home()) if args.codex else None)
     except ValueError as exc:

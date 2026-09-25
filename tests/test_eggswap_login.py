@@ -361,12 +361,18 @@ class LoginTests(unittest.TestCase):
                                  ["cswap", "add"], ["cswap", "status", "--json"]])
 
     def test_bare_add_can_cancel_before_provider_login(self):
-        for choice, expected in (("q", 0), ("unknown", 2)):
-            with self.subTest(choice=choice), mock.patch("builtins.input", return_value=choice):
-                runner = mock.Mock()
-                rc, _ = self._main(["add"], runner)
-                self.assertEqual(rc, expected)
-                runner.assert_not_called()
+        with mock.patch("builtins.input", return_value="q"):
+            runner = mock.Mock()
+            rc, _ = self._main(["add"], runner)
+            self.assertEqual(rc, 0)
+            runner.assert_not_called()
+        with mock.patch("builtins.input", side_effect=["unknown", "q"]) as prompt:
+            runner = mock.Mock()
+            rc, output = self._main(["add"], runner)
+            self.assertEqual(rc, 0)
+            self.assertIn("choose 1 for Claude, 2 for Codex", output)
+            self.assertEqual(prompt.call_count, 2)
+            runner.assert_not_called()
         with mock.patch("builtins.input", side_effect=KeyboardInterrupt):
             runner = mock.Mock()
             rc, _ = self._main(["add"], runner)
