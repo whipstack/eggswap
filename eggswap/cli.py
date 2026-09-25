@@ -705,22 +705,9 @@ def _cmd_profile_enabled(adapters, profile_key: str, *, enabled: bool, store, ou
 
 def _subscription_login_env(provider: str) -> dict[str, str]:
     """Keep ambient credentials from overriding interactive account selection."""
-    env = dict(os.environ)
-    if provider == "claude":
-        for name in (
-            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-            "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
-            "CLAUDE_CODE_OAUTH_SCOPES",
-            "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
-            "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_PROFILE",
-            "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
-            "ANTHROPIC_IDENTITY_TOKEN_FILE",
-        ):
-            env.pop(name, None)
-    else:
-        for name in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"):
-            env.pop(name, None)
-    return env
+    prefixes = ("ANTHROPIC_", "CLAUDE_") if provider == "claude" else ("OPENAI_", "CODEX_")
+    return {name: value for name, value in os.environ.items()
+            if not name.startswith(prefixes)}
 
 
 def _cmd_login(args, *, runner, out) -> int:

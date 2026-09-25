@@ -202,6 +202,10 @@ class LoginTests(unittest.TestCase):
             "CLAUDE_CODE_OAUTH_REFRESH_TOKEN": "unused",
             "CLAUDE_CODE_OAUTH_SCOPES": "unused",
             "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS": "1",
+            "ANTHROPIC_AWS_API_KEY": "unused",
+            "ANTHROPIC_BASE_URL": "https://example.invalid",
+            "ANTHROPIC_CUSTOM_HEADERS": "Authorization: unused",
             "ANTHROPIC_PROFILE": "other",
             "ANTHROPIC_FEDERATION_RULE_ID": "unused",
         }):
@@ -215,6 +219,10 @@ class LoginTests(unittest.TestCase):
             self.assertNotIn("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", env)
             self.assertNotIn("CLAUDE_CODE_OAUTH_SCOPES", env)
             self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", env)
+            self.assertNotIn("CLAUDE_CODE_USE_ANTHROPIC_AWS", env)
+            self.assertNotIn("ANTHROPIC_AWS_API_KEY", env)
+            self.assertNotIn("ANTHROPIC_BASE_URL", env)
+            self.assertNotIn("ANTHROPIC_CUSTOM_HEADERS", env)
             self.assertNotIn("ANTHROPIC_PROFILE", env)
             self.assertNotIn("ANTHROPIC_FEDERATION_RULE_ID", env)
 
@@ -228,7 +236,7 @@ class LoginTests(unittest.TestCase):
                 _fake_auth(home, "second-account")
             return SimpleNamespace(returncode=0)
 
-        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "unused", "CODEX_API_KEY": "unused", "CODEX_ACCESS_TOKEN": "unused"}), \
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "unused", "CODEX_API_KEY": "unused", "CODEX_ACCESS_TOKEN": "unused", "OPENAI_BASE_URL": "https://example.invalid"}), \
              mock.patch("eggswap.cli._default_codex_homes", return_value=[]):
             rc, output = self._main(["add", "--codex", "--home", str(home)], runner)
         self.assertEqual(rc, 0, output)
@@ -237,6 +245,7 @@ class LoginTests(unittest.TestCase):
             self.assertNotIn("OPENAI_API_KEY", env)
             self.assertNotIn("CODEX_API_KEY", env)
             self.assertNotIn("CODEX_ACCESS_TOKEN", env)
+            self.assertNotIn("OPENAI_BASE_URL", env)
             self.assertEqual(env["CODEX_HOME"], str(home.resolve()))
 
     def test_add_requires_terminal_but_help_does_not(self):
