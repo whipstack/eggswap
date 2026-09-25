@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import time
+from importlib.metadata import PackageNotFoundError, version as distribution_version
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence
 
@@ -912,6 +913,11 @@ def _cmd_add(args, *, runner, out, quarantine=None) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="eggswap")
+    try:
+        installed_version = distribution_version("eggswap")
+    except PackageNotFoundError:
+        installed_version = "uninstalled source"
+    parser.add_argument("--version", action="version", version=f"eggswap {installed_version}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("list", help="every profile, both providers, with honest availability")
@@ -976,6 +982,8 @@ def main(
     quarantine=None,
     quarantine_path: Optional[Path] = None,
 ) -> int:
+    if argv in (["--version"], ["--help"], ["-h"]):
+        _build_parser().parse_args(argv)
     if argv and argv[0] == "add":
         args = _build_parser().parse_args(argv)
         if quarantine is None:

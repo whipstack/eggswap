@@ -18,6 +18,7 @@ Or, from a checkout: `python3 -m pip install -e .`. Runtime dependencies are
 stdlib only; supported platforms are macOS and Linux.
 The v0.1.1 wheel supports the explicit `--claude` and `--codex` commands below;
 the bare `eggswap add` menu is in the repository source pending the next release.
+On newer installs, run `eggswap --version` to see which release is active.
 
 ## Add two Claude and two Codex accounts
 

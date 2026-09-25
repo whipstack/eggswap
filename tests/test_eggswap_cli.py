@@ -123,6 +123,16 @@ class AuthDeadVsExhaustedTests(unittest.TestCase):
 
 
 class DryRunTests(unittest.TestCase):
+    def test_version_does_not_load_accounts(self):
+        output = io.StringIO()
+        with mock.patch("eggswap.cli.distribution_version", return_value="0.1.1"), \
+             mock.patch("eggswap.cli._default_adapters", side_effect=AssertionError("loaded")), \
+             mock.patch("sys.stdout", output), \
+             self.assertRaises(SystemExit) as stopped:
+            main(["--version"])
+        self.assertEqual(stopped.exception.code, 0)
+        self.assertEqual(output.getvalue(), "eggswap 0.1.1\n")
+
     def test_run_help_explains_provider_command_without_loading_adapters(self):
         output = io.StringIO()
         with mock.patch("eggswap.cli._default_adapters", side_effect=AssertionError("loaded")):
