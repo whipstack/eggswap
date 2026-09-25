@@ -32,7 +32,7 @@ Skip an `add` if that account is already in `eggswap list`. Each successful
 command prints its account key. Eggswap opens the provider's own login; you
 complete it in the browser. Eggswap never asks for a token. The published
 v0.1.1 wheel supports `--claude` and `--codex`; the no-flag `eggswap add`
-menu is in the next release. Check your version with `eggswap --version`.
+menu and `eggswap --version` are in the next release.
 
 `eggswap list` should show two distinct `claude:N` keys and two distinct
 `codex:<id>` keys. `eggswap status` shows which can run work now. A new
