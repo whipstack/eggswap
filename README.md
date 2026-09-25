@@ -16,108 +16,66 @@ eggswap status
 
 Or, from a checkout: `python3 -m pip install -e .`. Runtime dependencies are
 stdlib only; supported platforms are macOS and Linux.
+The v0.1.1 wheel supports the explicit `--claude` and `--codex` commands below;
+the bare `eggswap add` menu is in the repository source pending the next release.
 
 ## Add two Claude and two Codex accounts
 
-On a fresh machine, run these four commands in your own terminal. Complete
-each provider's browser sign-in with a **different account** before starting
-the next command:
+Run these in **your own terminal**. Finish each browser login before starting
+the next. Use a different account for each provider's second login.
 
 ```sh
-eggswap add --claude  # Claude account A
-eggswap add --claude  # Claude account B
-eggswap add --codex   # Codex account A
-eggswap add --codex   # Codex account B
+eggswap add --claude
+eggswap add --claude
+eggswap add --codex
+eggswap add --codex
 eggswap list
 ```
 
-If an account is already shown by `eggswap list`, skip its add command. Copy
-the four exact profile keys from that output for the checks below. An
-interactive terminal is required for sign-in; Eggswap delegates authentication
-to the provider's CLI and never asks for a token.
+Each `add` prints the account key it registered. If `eggswap list` already
+shows an account, skip its add command. `eggswap add` without a flag offers a
+Claude/Codex menu. Eggswap invokes `claude auth login` or `codex login`;
+you complete authentication there. It never asks you to paste a token.
 
-You can also run `eggswap add` and choose Claude or Codex from a short prompt.
-The explicit provider flags above are useful when following a repeatable setup
-checklist. Press `q` to cancel before a provider login starts.
+`eggswap list` checks **discovery**: you should see two distinct `claude:N`
+keys and two distinct `codex:<id>` keys. `eggswap status` checks whether those
+profiles are currently **schedulable**. A fresh profile may have `UNKNOWN`
+capacity; it remains listed but cannot be selected until the provider reports
+usable quota. A second Codex home alone does not prove credential isolation;
+Eggswap reports `UNKNOWN` when it cannot verify an effective file-backed store.
 
-### Claude: add accounts to cswap
-
-Eggswap runs `claude auth login`, then `cswap add`. Check the registered slots
-with:
-
-```sh
-cswap list
-```
-
-Claude's [CLI reference](https://code.claude.com/docs/en/cli-reference)
-documents the native browser login and structured authentication status.
-
-After capture, Eggswap shows a snapshot of the `claude:N` slot when native
-Claude auth and `cswap status --json` report the same identity. Verify the
-identity in `cswap list`: another `cswap auto`, `switch`, `move`, or `swap`
-process can change the global account or its slot during enrollment. Avoid
-concurrent switching while you add accounts. If that slot remains in
-`AUTH_DEAD` quarantine, verify its current identity with `cswap list`, then
-run `eggswap clear claude:N`. Eggswap does not clear it automatically because
-`cswap move` or `cswap swap` can change who owns a numbered slot. If Eggswap
-cannot confirm the captured slot, inspect `cswap list` and `eggswap list`.
-
-Do not invoke add from a `cswap run` session. To refresh an existing account,
-sign into that same identity again with `eggswap add --claude`; cswap updates
-its slot. The sign-in changes the default Claude login, so finish or move any
-process using it first. Work launches still use `cswap run`.
-
-### Codex: add accounts in separate homes
-
-An existing `~/.codex` login can count as the first Codex account. Each
-`eggswap add --codex` chooses the next free private home
-(`~/.local/share/eggswap/codex-2`, then
-`codex-3`, etc.). To choose one yourself, use
-`eggswap add --codex --home /absolute/path`. Eggswap creates the home with a
-file-backed credential-store setting if it is new, delegates authentication
-to `codex login`, and remembers only the home path.
-It never handles the credential. For a device-code flow, add `--device-auth`.
-The [Codex CLI reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli#codex-login)
-documents both login flows; its [authentication guide](https://learn.chatgpt.com/docs/auth#credential-storage)
-explains why each home explicitly uses file-backed credentials.
-Do not copy `auth.json` between homes. Existing `EGGSWAP_CODEX_HOMES` (paths
-separated by `:` on macOS/Linux) and `CODEX_HOME` remain supported; the
-enrolled home is remembered across shells without an environment variable.
-
-**Check the result:** `eggswap list` should show two different `codex:<id>`
-keys, each with quota data. A second directory alone does not prove account
-isolation: Codex also supports keyring, auto and ephemeral credential stores,
-and managed policy can override `config.toml`. With multiple homes Eggswap
-reads Codex's effective settings and leaves capacity `UNKNOWN` unless it can
-verify the `file` store. If either Codex profile is `UNKNOWN`, read its reason
-in `eggswap list`; do not treat it as available. See
-[Codex credential isolation](docs/codex-keyring-namespacing.md).
-
-### Test all four without spending model quota
+To check a particular profile without launching work, copy its exact key from
+`eggswap list` and run:
 
 ```sh
-eggswap status
-eggswap select --pin claude:1
-eggswap select --pin claude:2
-eggswap select --pin codex:FIRST_ID
-eggswap select --pin codex:SECOND_ID
-eggswap run --dry-run claude:1 -- --version
-eggswap run --dry-run codex:SECOND_ID -- codex --version
+eggswap select --pin 'claude:1'
+eggswap run --dry-run 'claude:1' -- --version
 ```
 
-Replace keys with the ones printed by `eggswap list`. `--pin` refuses an
-unavailable account (exit 3); it never silently picks another. `--dry-run`
-prints the launch binding and does not take a lease or start the provider CLI.
-For a real launch and lease check, use `eggswap run claude:1 -- --version`
-or `eggswap run codex:ACCOUNT_ID -- codex --version`. These version commands do not
-send a model request. A second `run` against an account already held by an
-Eggswap process exits 10. An unheld account can run independently.
+Replace `claude:1` with the key you are checking. Repeat for the other three
+keys. `select --pin` refuses unavailable profiles (exit 3); `run --dry-run`
+shows the launch binding without a model request or lease. Neither command
+proves that the browser used the intended human account; check Claude identity
+with `cswap list` and the Codex account IDs in `eggswap list`.
 
-If you have more than two Claude accounts, use `--pin` for this test. To keep
-an account out of future automatic selection, use
-`eggswap disable claude:SLOT` and later `eggswap enable claude:SLOT`.
-Disabling persists across inventory refreshes and does not terminate a
-running process.
+### If sign-in does not work
+
+- `eggswap add --claude` runs `claude auth login`, then `cswap add`. Run it in a
+  normal terminal, outside `cswap run`, with `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` unset. It changes the default Claude login;
+  finish other processes using that login first. Do not use `/logout` to add
+  the next account. If the reported slot changes, check `cswap list` again.
+- `eggswap add --codex` picks a new private home under
+  `~/.local/share/eggswap/`. Use `--home /absolute/path` to choose one. If the
+  browser callback cannot reach your CLI, retry with `--device-auth` and enter
+  the code in your own terminal/browser. Never share a device code or
+  `auth.json`.
+- If the second login is the same account, sign in again with the other
+  account. Eggswap refuses a duplicate Codex account ID. For Codex credential
+  store details, see [isolation notes](docs/codex-keyring-namespacing.md).
+- `eggswap list` names the reason for `UNKNOWN` or dead authentication. A
+  previously quarantined Claude slot requires identity verification in
+  `cswap list` before `eggswap clear claude:N`.
 
 ## Commands
 
@@ -130,7 +88,7 @@ running process.
 | `eggswap select --pin <key>` | Require one profile, or refuse. |
 | `eggswap run <key> -- <command>` | Recheck capacity, take an exclusive lease and launch. For Claude, `<command>` is the argument list forwarded to `claude` through `cswap run`; for Codex, include the `codex` executable. |
 | `eggswap run --dry-run <key> -- <command>` | Print the binding without launching. |
-| `eggswap disable <key>` / `enable <key>` | Persistently exclude or restore a profile. |
+| `eggswap disable <key>` / `eggswap enable <key>` | Persistently exclude or restore a profile. |
 | `eggswap clear <key>` | Clear a hand-held quarantine after its cause is fixed. |
 
 `EGGSWAP_STATE_DIR` changes the local lease and quarantine directory (default

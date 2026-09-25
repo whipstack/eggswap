@@ -62,6 +62,7 @@ class LoginTests(unittest.TestCase):
         self.assertEqual(calls[0], (["codex", "login"], str(chosen.resolve())))
         self.assertEqual(enrolled_codex_homes(), [chosen.resolve()])
         self.assertEqual((occupied / "auth.json").exists(), True)
+        self.assertIn("Added Codex account as codex:new-account", output)
 
     def test_codex_add_skips_incompatible_existing_home(self):
         base = self.root / ".local/share/eggswap"
@@ -70,6 +71,20 @@ class LoginTests(unittest.TestCase):
         (occupied / "config.toml").write_text('cli_auth_credentials_store = "keyring"\n')
         with mock.patch("eggswap.cli.Path.home", return_value=self.root):
             self.assertEqual(cli._next_codex_home(), base / "codex-3")
+
+    def test_codex_only_home_option_skips_provider_prompt(self):
+        home = self.root / "codex-2"
+
+        def runner(argv, *, env):
+            if argv == ["codex", "login"]:
+                _fake_auth(home, "second-account")
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch("eggswap.cli._default_codex_homes", return_value=[]), \
+             mock.patch("builtins.input", side_effect=AssertionError("unexpected prompt")):
+            rc, output = self._main(["add", "--home", str(home)], runner)
+        self.assertEqual(rc, 0, output)
+        self.assertIn("codex:second-account", output)
 
     def test_claude_only_flags_are_rejected_before_login(self):
         runner = mock.Mock()
@@ -340,12 +355,13 @@ class LoginTests(unittest.TestCase):
             rc, output = self._main(["add"], runner)
         self.assertEqual(rc, 0, output)
         self.assertIn("[1] Claude", output)
+        self.assertIn("Added Claude account one@example.test as claude:1", output)
         self.assertEqual(calls, [["claude", "auth", "login"],
                                  ["claude", "auth", "status", "--json"],
                                  ["cswap", "add"], ["cswap", "status", "--json"]])
 
     def test_bare_add_can_cancel_before_provider_login(self):
-        for choice, expected in (("q", 2), ("unknown", 2)):
+        for choice, expected in (("q", 0), ("unknown", 2)):
             with self.subTest(choice=choice), mock.patch("builtins.input", return_value=choice):
                 runner = mock.Mock()
                 rc, _ = self._main(["add"], runner)
@@ -363,6 +379,7 @@ class LoginTests(unittest.TestCase):
             rc, output = self._main(["add", "--claude"], runner)
         self.assertEqual(rc, 2)
         self.assertIn("unset CLAUDE_CONFIG_DIR", output)
+        self.assertIn("outside cswap run", output)
         runner.assert_not_called()
 
     def test_claude_login_refuses_secure_storage_override(self):

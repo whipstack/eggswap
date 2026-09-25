@@ -722,7 +722,9 @@ def _cmd_login(args, *, runner, out, quarantine=None) -> int:
             print("eggswap add --claude: --home and --device-auth are Codex options", file=out)
             return 2
         if os.environ.get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"):
-            print("eggswap add --claude: unset CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR; cswap add captures the default login", file=out)
+            print("eggswap add --claude: run this from a normal terminal, outside cswap run. "
+                  "unset CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR there; "
+                  "cswap add captures the default login", file=out)
             return 2
         try:
             env = _clean_provider_env("claude")
@@ -769,7 +771,8 @@ def _cmd_login(args, *, runner, out, quarantine=None) -> int:
         if slot is None:
             print("eggswap add --claude: cswap add finished, but its account could not be identified; inspect cswap list and eggswap list", file=out)
             return 3
-        print(f"cswap add finished; current snapshot shows claude:{slot}. Verify its identity with cswap list, then inspect capacity with eggswap list", file=out)
+        print(f"Added Claude account {expected_identity[0]} as claude:{slot} "
+              "(current cswap snapshot). Check capacity with eggswap list", file=out)
         if quarantine is not None:
             failure = quarantine.reason(f"claude:{slot}")
             if failure is not None and failure.kind == AUTH_DEAD:
@@ -836,7 +839,8 @@ def _cmd_login(args, *, runner, out, quarantine=None) -> int:
     except (OSError, ValueError) as exc:
         print(f"eggswap add --codex: {exc}", file=out)
         return 2
-    print(f"registered {profile.key} in {home}; run eggswap list to inspect capacity", file=out)
+    print(f"Added Codex account as {profile.key} in {home}. "
+          "Check capacity with eggswap list", file=out)
     return 0
 
 
@@ -868,25 +872,30 @@ def _next_codex_home() -> Path:
 def _cmd_add(args, *, runner, out, quarantine=None) -> int:
     """Interactive account enrollment, with optional explicit provider flags."""
     if not args.codex and not args.claude:
-        print("Add an account: [1] Claude  [2] Codex  [q] Cancel", file=out)
-        try:
-            choice = input("Choose provider [1/2]: ").strip().lower()
-        except KeyboardInterrupt:
-            print("eggswap add: cancelled", file=out)
-            return 130
-        except EOFError:
-            print("eggswap add: cancelled", file=out)
-            return 2
-        if choice in ("1", "claude"):
-            args.claude = True
-        elif choice in ("2", "codex"):
+        # These options exist only for Codex. Their presence identifies the
+        # provider without making the user answer an unnecessary prompt.
+        if args.home or args.device_auth:
             args.codex = True
-        elif choice in ("q", "quit"):
-            print("eggswap add: cancelled", file=out)
-            return 2
         else:
-            print("eggswap add: choose 1 for Claude or 2 for Codex", file=out)
-            return 2
+            print("Add an account: [1] Claude  [2] Codex  [q] Cancel", file=out)
+            try:
+                choice = input("Choose provider [1/2]: ").strip().lower()
+            except KeyboardInterrupt:
+                print("eggswap add: cancelled", file=out)
+                return 130
+            except EOFError:
+                print("eggswap add: cancelled", file=out)
+                return 2
+            if choice in ("1", "claude"):
+                args.claude = True
+            elif choice in ("2", "codex"):
+                args.codex = True
+            elif choice in ("q", "quit"):
+                print("eggswap add: cancelled", file=out)
+                return 0
+            else:
+                print("eggswap add: choose 1 for Claude or 2 for Codex", file=out)
+                return 2
     try:
         home = args.home or (str(_next_codex_home()) if args.codex else None)
     except ValueError as exc:
