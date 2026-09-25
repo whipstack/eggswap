@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eggswap"
-version = "0.1.0"
+version = "0.1.1"
 description = "One local, single-owner, multi-account plane that rotates both Claude and Codex accounts behind one honest interface."
 readme = "README.md"
 license = "MIT"

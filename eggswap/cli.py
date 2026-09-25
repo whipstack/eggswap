@@ -215,6 +215,7 @@ def _default_codex_homes() -> List[Path]:
 
       EGGSWAP_CODEX_HOMES   os.pathsep-separated, the multi-account case;
       CODEX_HOME            the single home this shell is already bound to;
+      Eggswap enrollment   homes added by `eggswap login codex`;
       ~/.codex              the default home, when it actually exists.
 
     Deliberately NOT a filesystem scan for anything that looks like a home:
@@ -237,6 +238,10 @@ def _default_codex_homes() -> List[Path]:
     for raw in (os.environ.get("EGGSWAP_CODEX_HOMES") or "").split(os.pathsep):
         add(raw.strip())
     add(os.environ.get("CODEX_HOME") or "")
+    from eggswap.core.codex_homes import enrolled_codex_homes
+
+    for home in enrolled_codex_homes():
+        add(str(home))
     add(str(Path.home() / ".codex"))
     return homes
 
@@ -697,12 +702,146 @@ def _cmd_profile_enabled(adapters, profile_key: str, *, enabled: bool, store, ou
     return 0
 
 
+def _cmd_login(args, *, runner, out) -> int:
+    """Delegate interactive authentication to the provider's own CLI.
+
+    Eggswap never receives a token on stdin or in argv. Codex enrollment
+    records a home path only after the native login and status check succeed.
+    """
+    if args.provider == "claude":
+        if args.home or args.device_auth:
+            print("eggswap add --claude: --home and --device-auth are Codex options", file=out)
+            return 2
+        if os.environ.get("CLAUDE_CONFIG_DIR"):
+            print("eggswap add --claude: unset CLAUDE_CONFIG_DIR; cswap add captures the default login", file=out)
+            return 2
+        try:
+            login = runner(["claude", "auth", "login"], env=dict(os.environ))
+            if login.returncode:
+                return login.returncode
+            capture = runner(["cswap", "add"], env=dict(os.environ))
+        except OSError as exc:
+            print(f"eggswap add --claude: provider CLI unavailable: {exc}", file=out)
+            return 2
+        if capture.returncode:
+            print("eggswap add --claude: cswap did not register the login", file=out)
+            return capture.returncode
+        print("Claude login registered in cswap; run eggswap list to inspect it", file=out)
+        return 0
+
+    if not args.home:
+        print("eggswap add --codex: no CODEX_HOME was selected", file=out)
+        return 2
+    raw = Path(args.home).expanduser()
+    if not raw.is_absolute() or raw.is_symlink():
+        print("eggswap add --codex: --home must be an absolute, non-symlink path", file=out)
+        return 2
+    home = raw.resolve()
+    try:
+        if home.exists() and not home.is_dir():
+            raise ValueError("CODEX_HOME exists but is not a directory")
+        home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if home.stat().st_mode & 0o077:
+            raise ValueError("CODEX_HOME must be private (chmod 700) before login")
+        config = home / "config.toml"
+        if config.exists():
+            from eggswap.adapters.codex_home import _read_declared_store_config
+
+            if config.is_symlink() or not config.is_file() or _read_declared_store_config(config) != "file":
+                raise ValueError("existing config.toml must explicitly set cli_auth_credentials_store = \"file\"")
+        else:
+            with config.open("x", encoding="utf-8") as handle:
+                handle.write('cli_auth_credentials_store = "file"\n')
+            os.chmod(config, 0o600)
+        from eggswap.core.codex_homes import enroll_codex_home, exclusive_login
+        from eggswap.adapters.codex_home import CodexHomeAdapter
+
+        with exclusive_login(home):
+            if (home / "auth.json").exists() or (home / "auth.json").is_symlink():
+                raise ValueError("auth.json already exists; choose a fresh home for a new account")
+            existing_homes = [path.resolve() for path in _default_codex_homes() if path.resolve() != home]
+            existing_ids = {profile.account_id for profile in CodexHomeAdapter(existing_homes).profiles()}
+            env = dict(os.environ, CODEX_HOME=str(home))
+            argv = ["codex", "login"] + (["--device-auth"] if args.device_auth else [])
+            login = runner(argv, env=env)
+            if login.returncode:
+                return login.returncode
+            status = runner(["codex", "login", "status"], env=env)
+            if status.returncode:
+                print("eggswap add --codex: Codex did not confirm the login", file=out)
+                return status.returncode
+            profiles = CodexHomeAdapter([home]).profiles()
+            if len(profiles) != 1:
+                print("eggswap add --codex: no file-backed account identity appeared in this home", file=out)
+                return 3
+            profile = profiles[0]
+            if profile.account_id in existing_ids:
+                print("eggswap add --codex: this account is already present in another CODEX_HOME", file=out)
+                return 3
+            enroll_codex_home(home)
+    except (OSError, ValueError) as exc:
+        print(f"eggswap add --codex: {exc}", file=out)
+        return 2
+    print(f"registered {profile.key} in {home}; run eggswap list to inspect capacity", file=out)
+    return 0
+
+
+def _next_codex_home() -> Path:
+    """Choose the next Eggswap-owned home without touching an existing login."""
+    from eggswap.adapters.codex_home import _read_declared_store_config
+    from eggswap.core.codex_homes import enrolled_codex_homes
+
+    base = Path.home() / ".local/share/eggswap"
+    enrolled = {path.resolve() for path in enrolled_codex_homes()}
+    for slot in range(2, 10_000):
+        home = base / f"codex-{slot}"
+        if home.is_symlink() or home.resolve() in enrolled:
+            continue
+        if (home / "auth.json").exists() or (home / "auth.json").is_symlink():
+            continue
+        if home.exists() and not home.is_dir():
+            continue
+        config = home / "config.toml"
+        if config.exists() and (
+            config.is_symlink() or not config.is_file()
+            or _read_declared_store_config(config) != "file"
+        ):
+            continue
+        return home
+    raise ValueError("no free Eggswap Codex home slot")
+
+
+def _cmd_add(args, *, runner, out) -> int:
+    """The short, provider-flag spelling for interactive account enrollment."""
+    try:
+        home = args.home or (str(_next_codex_home()) if args.codex else None)
+    except ValueError as exc:
+        print(f"eggswap add: {exc}", file=out)
+        return 2
+    login_args = argparse.Namespace(
+        provider="codex" if args.codex else "claude",
+        home=home,
+        device_auth=args.device_auth,
+    )
+    return _cmd_login(login_args, runner=runner, out=out)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="eggswap")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("list", help="every profile, both providers, with honest availability")
     sub.add_parser("status", help="one-line summary + which profiles are schedulable")
+
+    add_parser = sub.add_parser(
+        "add", help="sign in and add one Claude or Codex account",
+        epilog="examples: eggswap add --claude | eggswap add --codex | eggswap add --codex --home /absolute/path",
+    )
+    provider_flags = add_parser.add_mutually_exclusive_group(required=True)
+    provider_flags.add_argument("--codex", action="store_true", help="add a Codex account in a private home")
+    provider_flags.add_argument("--claude", action="store_true", help="sign in to Claude, then register it through cswap")
+    add_parser.add_argument("--home", help="optional CODEX_HOME; otherwise use the next Eggswap slot")
+    add_parser.add_argument("--device-auth", action="store_true", help="use Codex's device-code flow")
 
     select_parser = sub.add_parser("select", help="print the chosen profile, do not launch")
     select_parser.add_argument("--provider", choices=[p.value for p in Provider], default=None)
@@ -753,6 +892,9 @@ def main(
     quarantine=None,
     quarantine_path: Optional[Path] = None,
 ) -> int:
+    if argv and argv[0] == "add":
+        args = _build_parser().parse_args(argv)
+        return _cmd_add(args, runner=runner, out=out)
     resolved_adapters = _default_adapters() if adapters is None else list(adapters)
     resolved_now = time.time() if now is None else now
     # `store=False` disables the hold entirely (tests, and anyone who wants the

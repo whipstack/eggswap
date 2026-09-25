@@ -10,7 +10,7 @@ Requires Python 3.10+, `cswap` for Claude, and the `codex` CLI for Codex.
 Install the published wheel (Eggswap is not published to PyPI):
 
 ```sh
-python3 -m pip install https://github.com/whipstack/eggswap/releases/download/v0.1.0/eggswap-0.1.0-py3-none-any.whl
+python3 -m pip install https://github.com/whipstack/eggswap/releases/download/v0.1.1/eggswap-0.1.1-py3-none-any.whl
 eggswap status
 ```
 
@@ -27,44 +27,40 @@ cswap list
 
 If your two accounts are already listed with live usage, they are already in
 Eggswap. Their profile keys are `claude:1`, `claude:2`, etc. To register a new
-Claude account, sign in to it in the **default** Claude configuration, then
-capture that login with `cswap`:
+Claude account, run:
 
 ```sh
-claude auth login
-cswap add
+eggswap add --claude
 cswap list
 ```
 
-Repeat for the second account. `cswap add` captures the currently signed-in
-account; do not run it from a `cswap run` session or with
-`CLAUDE_CONFIG_DIR` pointing to a session profile. If a listed account says
-`re-login needed`, sign in to that same account and run `cswap add` again to
-refresh its slot. Signing in changes the default Claude login, so finish or
-move any process using it first. Eggswap uses `cswap run` for each launch and
-never needs a global `cswap switch` loop.
+Repeat for the second account. Eggswap runs `claude auth login`, then `cswap
+add`; the native tools keep the credentials. Do not invoke it from a `cswap
+run` session. If a listed account says `re-login needed`, sign in to that
+same account with `eggswap add --claude` to refresh its slot. This changes the
+default Claude login, so finish or move any process using it first. Work
+launches still use `cswap run`, without a global `cswap switch` loop.
 
-### Codex: sign in once per home
+### Codex: add accounts in separate homes
 
-The first account can use the existing `~/.codex` login. Create a fresh home
-for the second account; leave its credential file empty until `codex login`
-creates it:
+The first account can use the existing `~/.codex` login. Sign in to a
+different account through Eggswap:
 
 ```sh
-mkdir -p "$HOME/.local/share/eggswap/codex-2"
-chmod 700 "$HOME/.local/share/eggswap/codex-2"
-printf 'cli_auth_credentials_store = "file"\n' > "$HOME/.local/share/eggswap/codex-2/config.toml"
-CODEX_HOME="$HOME/.local/share/eggswap/codex-2" codex login
-CODEX_HOME="$HOME/.local/share/eggswap/codex-2" codex login status
-export EGGSWAP_CODEX_HOMES="$HOME/.codex:$HOME/.local/share/eggswap/codex-2"
+eggswap add --codex
 eggswap list
 ```
 
-Complete the browser login with a *different* Codex account. The `:` between
-homes is the path separator on macOS and Linux. Export the variable in each
-shell that runs Eggswap, or put it in your shell startup file. Do not copy
-`auth.json` between homes. Eggswap also discovers `CODEX_HOME` and the
-existing `~/.codex` directory; duplicate paths are ignored.
+Complete the native Codex browser login with a *different* account. Eggswap
+chooses the next free private home (`~/.local/share/eggswap/codex-2`, then
+`codex-3`, etc.). To choose one yourself, use
+`eggswap add --codex --home /absolute/path`. Eggswap creates the home with a
+file-backed credential-store setting if it is new, delegates authentication
+to `codex login`, and remembers only the home path.
+It never handles the credential. For a device-code flow, add `--device-auth`.
+Do not copy `auth.json` between homes. Existing `EGGSWAP_CODEX_HOMES` (paths
+separated by `:` on macOS/Linux) and `CODEX_HOME` remain supported; the
+enrolled home is remembered across shells without an environment variable.
 
 **Check the result:** `eggswap list` should show two different `codex:<id>`
 keys, each with quota data. A second directory alone does not prove account
@@ -107,6 +103,7 @@ running process.
 | --- | --- |
 | `eggswap list` | Show every discovered account and its availability. |
 | `eggswap status` | Show schedulable, held and disabled profiles. |
+| `eggswap add --claude` / `eggswap add --codex` | Authenticate through the provider's CLI; Codex homes are chosen automatically and enrolled without storing tokens. |
 | `eggswap select [--provider claude\|codex] [--explain]` | Choose a profile without reserving it; explain shows refusals. |
 | `eggswap select --pin <key>` | Require one profile, or refuse. |
 | `eggswap run <key> -- <command>` | Recheck capacity, take an exclusive lease and launch. For Claude, `<command>` is the argument list forwarded to `claude` through `cswap run`; for Codex, include the `codex` executable. |
