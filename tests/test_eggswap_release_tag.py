@@ -25,7 +25,7 @@ class ReleaseTagVerificationTests(unittest.TestCase):
         self._git("add", "payload")
         self._git("commit", "-qm", "first")
         self.first_sha = self._git("rev-parse", "HEAD")
-        self._git("tag", "-a", "v0.1.1", "-m", "release")
+        self._git("tag", "-a", "v0.1.2", "-m", "release")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -39,7 +39,7 @@ class ReleaseTagVerificationTests(unittest.TestCase):
     def _verify(self, event_sha):
         env = os.environ.copy()
         env.update(
-            RELEASE_TAG="v0.1.1",
+            RELEASE_TAG="v0.1.2",
             EVENT_SHA=event_sha,
             REPOSITORY_URL=str(self.repo),
         )
@@ -50,12 +50,12 @@ class ReleaseTagVerificationTests(unittest.TestCase):
     def test_current_annotated_tag_target_matches_event_sha(self):
         result = self._verify(self.first_sha)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("verified v0.1.1", result.stdout)
+        self.assertIn("verified v0.1.2", result.stdout)
 
     def test_moved_tag_target_refuses_rerun_for_original_event_sha(self):
         (self.repo / "payload").write_text("second\n", encoding="utf-8")
         self._git("commit", "-qam", "second")
-        self._git("tag", "-fa", "v0.1.1", "-m", "moved release tag")
+        self._git("tag", "-fa", "v0.1.2", "-m", "moved release tag")
 
         result = self._verify(self.first_sha)
         self.assertEqual(result.returncode, 1)
@@ -69,7 +69,7 @@ class ReleaseTagVerificationTests(unittest.TestCase):
             [sys.executable, str(SCRIPT)], cwd=ROOT, env=env, text=True, capture_output=True
         )
         self.assertEqual(result.returncode, 1)
-        self.assertIn("does not match package version 'v0.1.1'", result.stderr)
+        self.assertIn("does not match package version 'v0.1.2'", result.stderr)
 
 
 if __name__ == "__main__":
