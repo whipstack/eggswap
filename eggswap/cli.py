@@ -710,7 +710,8 @@ def _clean_provider_env(provider: str) -> dict[str, str]:
     """Keep ambient credentials from overriding the selected account."""
     prefixes = ("ANTHROPIC_", "CLAUDE_") if provider == "claude" else ("OPENAI_", "CODEX_")
     return {name: value for name, value in os.environ.items()
-            if not name.startswith(prefixes)}
+            if not name.startswith(prefixes)
+            or (provider == "codex" and name == "CODEX_CA_CERTIFICATE")}
 
 
 def _cmd_login(args, *, runner, out, quarantine=None) -> int:

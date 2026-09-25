@@ -457,7 +457,7 @@ class LoginTests(unittest.TestCase):
                 _fake_auth(home, "second-account")
             return SimpleNamespace(returncode=0)
 
-        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "unused", "CODEX_API_KEY": "unused", "CODEX_ACCESS_TOKEN": "unused", "OPENAI_BASE_URL": "https://example.invalid"}), \
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "unused", "CODEX_API_KEY": "unused", "CODEX_ACCESS_TOKEN": "unused", "OPENAI_BASE_URL": "https://example.invalid", "CODEX_CA_CERTIFICATE": str(self.root / "corporate-ca.pem")}), \
              mock.patch("eggswap.cli._default_codex_homes", return_value=[]):
             rc, output = self._main(["add", "--codex", "--home", str(home)], runner)
         self.assertEqual(rc, 0, output)
@@ -467,6 +467,7 @@ class LoginTests(unittest.TestCase):
             self.assertNotIn("CODEX_API_KEY", env)
             self.assertNotIn("CODEX_ACCESS_TOKEN", env)
             self.assertNotIn("OPENAI_BASE_URL", env)
+            self.assertEqual(env["CODEX_CA_CERTIFICATE"], str(self.root / "corporate-ca.pem"))
             self.assertEqual(env["CODEX_HOME"], str(home.resolve()))
 
     def test_add_requires_terminal_but_help_does_not(self):
