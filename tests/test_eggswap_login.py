@@ -383,6 +383,15 @@ class LoginTests(unittest.TestCase):
             self.assertEqual(rc, 130)
             runner.assert_not_called()
 
+    def test_interrupt_during_provider_login_is_reported_without_success(self):
+        def runner(argv, *, env, **kwargs):
+            raise KeyboardInterrupt
+
+        rc, output = self._main(["add", "--claude"], runner)
+        self.assertEqual(rc, 130)
+        self.assertIn("interrupted", output)
+        self.assertNotIn("Added Claude account", output)
+
     def test_claude_login_refuses_session_home_before_mutation(self):
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.root / "session")}):
             runner = mock.Mock()

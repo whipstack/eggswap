@@ -926,7 +926,11 @@ def _cmd_add(args, *, runner, out, quarantine=None) -> int:
         home=home,
         device_auth=args.device_auth,
     )
-    return _cmd_login(login_args, runner=runner, out=out, quarantine=quarantine)
+    try:
+        return _cmd_login(login_args, runner=runner, out=out, quarantine=quarantine)
+    except KeyboardInterrupt:
+        print("eggswap add: interrupted; check eggswap list before retrying", file=out)
+        return 130
 
 
 def _build_parser() -> argparse.ArgumentParser:
