@@ -499,6 +499,8 @@ class LoginTests(unittest.TestCase):
                 cli.main_entry()
             self.assertEqual(stopped.exception.code, 2)
             self.assertIn("terminal", stderr.getvalue())
+            self.assertIn("eggswap add --claude", stderr.getvalue())
+            self.assertIn("eggswap add --codex", stderr.getvalue())
             main.assert_not_called()
         with mock.patch.object(cli.sys, "argv", ["eggswap", "add", "--help"]), \
              mock.patch.object(cli.sys, "stdin") as stdin, \

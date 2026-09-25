@@ -1125,7 +1125,11 @@ def main_entry() -> None:
     """
     if sys.argv[1:2] == ["add"] and "--help" not in sys.argv[2:] and "-h" not in sys.argv[2:]:
         if not sys.stdin.isatty():
-            print("eggswap add: interactive sign-in needs a terminal; run this command in your own shell", file=sys.stderr)
+            print(
+                "eggswap add: interactive sign-in needs a terminal. "
+                "In your own shell, run eggswap add --claude or eggswap add --codex",
+                file=sys.stderr,
+            )
             sys.exit(2)
     sys.exit(main(sys.argv[1:]))
 
