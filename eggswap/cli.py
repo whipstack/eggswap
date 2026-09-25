@@ -210,10 +210,11 @@ def _held_keys(store, profiles, *, now: float) -> set:
 def _default_codex_homes() -> List[Path]:
     """Which Codex accounts this machine can see.
 
-    A Codex account IS a CODEX_HOME directory -- one home, one auth.json, one
-    account, for the life of a process (measured on codex-cli 0.156.1; see
-    docs/research/eggswap/codex-account-model.md). So enumerating accounts is
-    enumerating directories, and there are exactly three honest sources:
+    Eggswap discovers file-backed Codex accounts through CODEX_HOME directories.
+    A separate directory alone does not establish credential isolation when
+    Codex uses a keyring or managed store policy. The adapter checks the
+    effective store before treating multiple homes as schedulable accounts.
+    Homes come from these explicit sources:
 
       EGGSWAP_CODEX_HOMES   os.pathsep-separated, the multi-account case;
       CODEX_HOME            the single home this shell is already bound to;
@@ -947,7 +948,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     add_parser = sub.add_parser(
         "add", help="sign in and add one Claude or Codex account",
-        epilog="examples: eggswap add | eggswap add --claude | eggswap add --codex | eggswap add --codex --home /absolute/path",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Add two accounts from each provider (finish each sign-in before the next):\n"
+            "  eggswap add --claude\n"
+            "  eggswap add --claude\n"
+            "  eggswap add --codex\n"
+            "  eggswap add --codex\n"
+            "  eggswap list\n\n"
+            "Use eggswap add for a provider menu. If Codex's browser callback fails,\n"
+            "retry with eggswap add --codex --device-auth."
+        ),
     )
     provider_flags = add_parser.add_mutually_exclusive_group()
     provider_flags.add_argument("--codex", action="store_true", help="add a Codex account in a private home")
@@ -1007,6 +1018,7 @@ def main(
     if not argv:
         print("eggswap: add and run your Claude and Codex accounts", file=out)
         print("Start: eggswap add  (or eggswap add --claude / --codex)", file=out)
+        print("For 2+2: run eggswap add --claude twice, then eggswap add --codex twice", file=out)
         print("Then:  eggswap list; eggswap status", file=out)
         print("Help:  eggswap --help", file=out)
         return 0

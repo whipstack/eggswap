@@ -41,6 +41,16 @@ class LoginTests(unittest.TestCase):
         rc = cli.main(argv, out=output, runner=runner, **kwargs)
         return rc, output.getvalue()
 
+    def test_help_and_default_output_show_the_four_account_recipe(self):
+        rc, output = self._main([], mock.Mock())
+        self.assertEqual(rc, 0)
+        self.assertIn("eggswap add --claude twice", output)
+        self.assertIn("eggswap add --codex twice", output)
+        help_text = cli._build_parser()._subparsers._group_actions[0].choices["add"].format_help()
+        self.assertEqual(help_text.count("  eggswap add --claude\n"), 2)
+        self.assertEqual(help_text.count("  eggswap add --codex\n"), 2)
+        self.assertIn("eggswap add --codex --device-auth", help_text)
+
     def test_codex_add_chooses_next_free_home(self):
         base = self.root / ".local/share/eggswap"
         occupied = base / "codex-2"
