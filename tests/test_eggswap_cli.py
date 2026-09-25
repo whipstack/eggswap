@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import unittest
+from unittest import mock
 
 from eggswap.cli import main
 from eggswap.core.types import (
@@ -121,6 +122,14 @@ class AuthDeadVsExhaustedTests(unittest.TestCase):
 
 
 class DryRunTests(unittest.TestCase):
+    def test_run_help_explains_provider_command_without_loading_adapters(self):
+        output = io.StringIO()
+        with mock.patch("eggswap.cli._default_adapters", side_effect=AssertionError("loaded")):
+            code = main(["run", "--help"], out=output)
+        self.assertEqual(code, 0)
+        self.assertIn("usage: eggswap run", output.getvalue())
+        self.assertIn("Codex", output.getvalue())
+
     def test_dry_run_emits_exact_cswap_argv(self):
         profile = Profile(provider=Provider.CLAUDE, account_id="2", label="a@example.com")
         adapter = FakeAdapter(
@@ -135,6 +144,19 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["argv"], ["cswap", "run", "2", "--", "echo", "hi"])
+
+    def test_child_dry_run_flag_is_forwarded_after_separator(self):
+        profile = Profile(provider=Provider.CLAUDE, account_id="2", label="a@example.com")
+        adapter = FakeAdapter(
+            Provider.CLAUDE,
+            [(profile, Available(windows=(), observed_at=NOW))],
+        )
+        code, output = _run(
+            ["run", "claude:2", "--dry-run", "--", "--dry-run"], [adapter]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["argv"],
+                         ["cswap", "run", "2", "--", "--dry-run"])
 
     def test_dry_run_sets_codex_home_in_env_not_argv(self):
         profile = Profile(provider=Provider.CODEX, account_id="acct-9", label="acct-9")
@@ -154,6 +176,18 @@ class DryRunTests(unittest.TestCase):
 
 
 class ExitCodeTests(unittest.TestCase):
+    def test_status_does_not_count_api_key_without_budget(self):
+        profile = Profile(provider=Provider.CODEX, account_id="paid", label="paid", is_api_key=True)
+        adapter = FakeAdapter(
+            Provider.CODEX,
+            [(profile, Available(windows=(), observed_at=NOW))],
+        )
+        status_code, status_output = _run(["status"], [adapter])
+        select_code, _ = _run(["select"], [adapter])
+        self.assertEqual(status_code, 3)
+        self.assertIn("0 schedulable", status_output)
+        self.assertEqual(select_code, 3)
+
     def test_exit_code_3_when_nothing_schedulable(self):
         dead_profile = Profile(provider=Provider.CLAUDE, account_id="2", label="dead@example.com")
         unknown_profile = Profile(provider=Provider.CODEX, account_id="acct-1", label="acct-1")

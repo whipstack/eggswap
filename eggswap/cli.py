@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence
 
-from eggswap.core.select import Policy, select as select_candidate
+from eggswap.core.select import Policy, rank as rank_candidates, select as select_candidate
 from eggswap.core.types import (
     Available,
     AuthDead,
@@ -392,9 +392,10 @@ def _cmd_status(adapters, policy: Policy, out, *, now: float, store=None, quaran
         quarantined = {
             c.profile.key for c in candidates if quarantine.is_quarantined(c.profile.key)
         }
+    eligible = {c.profile.key for c in rank_candidates(candidates, policy, now=now)}
     schedulable = [
         c for c in candidates
-        if c.profile.enabled and c.availability.schedulable
+        if c.profile.key in eligible
         and c.profile.key not in held and c.profile.key not in quarantined
     ]
     print(
@@ -529,10 +530,10 @@ def _cmd_run(
     max_age_seconds: float = 300.0,
 ) -> int:
     tokens = list(rest)
-    dry_run = False
-    if "--dry-run" in tokens:
-        dry_run = True
-        tokens = [t for t in tokens if t != "--dry-run"]
+    separator = tokens.index("--") if "--" in tokens else len(tokens)
+    own_args, forwarded = tokens[:separator], tokens[separator:]
+    dry_run = "--dry-run" in own_args
+    tokens = [token for token in own_args if token != "--dry-run"] + forwarded
     if not tokens:
         print("eggswap run: missing profile-key", file=out)
         return 2
@@ -702,6 +703,18 @@ def _cmd_profile_enabled(adapters, profile_key: str, *, enabled: bool, store, ou
     return 0
 
 
+def _subscription_login_env(provider: str) -> dict[str, str]:
+    """Keep ambient API credentials from overriding an interactive login."""
+    env = dict(os.environ)
+    if provider == "claude":
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            env.pop(name, None)
+    else:
+        for name in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"):
+            env.pop(name, None)
+    return env
+
+
 def _cmd_login(args, *, runner, out) -> int:
     """Delegate interactive authentication to the provider's own CLI.
 
@@ -712,14 +725,15 @@ def _cmd_login(args, *, runner, out) -> int:
         if args.home or args.device_auth:
             print("eggswap add --claude: --home and --device-auth are Codex options", file=out)
             return 2
-        if os.environ.get("CLAUDE_CONFIG_DIR"):
-            print("eggswap add --claude: unset CLAUDE_CONFIG_DIR; cswap add captures the default login", file=out)
+        if os.environ.get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"):
+            print("eggswap add --claude: unset CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR; cswap add captures the default login", file=out)
             return 2
         try:
-            login = runner(["claude", "auth", "login"], env=dict(os.environ))
+            env = _subscription_login_env("claude")
+            login = runner(["claude", "auth", "login"], env=env)
             if login.returncode:
                 return login.returncode
-            capture = runner(["cswap", "add"], env=dict(os.environ))
+            capture = runner(["cswap", "add"], env=env)
         except OSError as exc:
             print(f"eggswap add --claude: provider CLI unavailable: {exc}", file=out)
             return 2
@@ -761,7 +775,8 @@ def _cmd_login(args, *, runner, out) -> int:
                 raise ValueError("auth.json already exists; choose a fresh home for a new account")
             existing_homes = [path.resolve() for path in _default_codex_homes() if path.resolve() != home]
             existing_ids = {profile.account_id for profile in CodexHomeAdapter(existing_homes).profiles()}
-            env = dict(os.environ, CODEX_HOME=str(home))
+            env = _subscription_login_env("codex")
+            env["CODEX_HOME"] = str(home)
             argv = ["codex", "login"] + (["--device-auth"] if args.device_auth else [])
             login = runner(argv, env=env)
             if login.returncode:
@@ -895,6 +910,11 @@ def main(
     if argv and argv[0] == "add":
         args = _build_parser().parse_args(argv)
         return _cmd_add(args, runner=runner, out=out)
+    if argv in (["run", "--help"], ["run", "-h"]):
+        print("usage: eggswap run [--dry-run] <profile-key> -- <command> [args...]", file=out)
+        print("Claude: arguments after -- go to claude through cswap run", file=out)
+        print("Codex: include codex as the command after --", file=out)
+        return 0
     resolved_adapters = _default_adapters() if adapters is None else list(adapters)
     resolved_now = time.time() if now is None else now
     # `store=False` disables the hold entirely (tests, and anyone who wants the
@@ -978,6 +998,10 @@ def main_entry() -> None:
     ``eggswap.cli:main_entry`` and nothing of that name existed, which no
     in-tree test would ever have noticed.
     """
+    if sys.argv[1:2] == ["add"] and "--help" not in sys.argv[2:] and "-h" not in sys.argv[2:]:
+        if not sys.stdin.isatty():
+            print("eggswap add: interactive sign-in needs a terminal; run this command in your own shell", file=sys.stderr)
+            sys.exit(2)
     sys.exit(main(sys.argv[1:]))
 
 

@@ -19,40 +19,42 @@ stdlib only; supported platforms are macOS and Linux.
 
 ## Add two Claude and two Codex accounts
 
-### Claude: add accounts to cswap
+On a fresh machine, run these four commands in your own terminal. Complete
+each provider's browser sign-in with a **different account** before starting
+the next command:
 
 ```sh
-cswap list
-```
-
-If your two accounts are already listed with live usage, they are already in
-Eggswap. Their profile keys are `claude:1`, `claude:2`, etc. To register a new
-Claude account, run:
-
-```sh
-eggswap add --claude
-cswap list
-```
-
-Repeat for the second account. Eggswap runs `claude auth login`, then `cswap
-add`; the native tools keep the credentials. Do not invoke it from a `cswap
-run` session. If a listed account says `re-login needed`, sign in to that
-same account with `eggswap add --claude` to refresh its slot. This changes the
-default Claude login, so finish or move any process using it first. Work
-launches still use `cswap run`, without a global `cswap switch` loop.
-
-### Codex: add accounts in separate homes
-
-The first account can use the existing `~/.codex` login. Sign in to a
-different account through Eggswap:
-
-```sh
-eggswap add --codex
+eggswap add --claude  # Claude account A
+eggswap add --claude  # Claude account B
+eggswap add --codex   # Codex account A
+eggswap add --codex   # Codex account B
 eggswap list
 ```
 
-Complete the native Codex browser login with a *different* account. Eggswap
-chooses the next free private home (`~/.local/share/eggswap/codex-2`, then
+If an account is already shown by `eggswap list`, skip its add command. Copy
+the four exact profile keys from that output for the checks below. An
+interactive terminal is required for sign-in; Eggswap delegates authentication
+to the provider's CLI and never asks for a token.
+
+### Claude: add accounts to cswap
+
+Eggswap runs `claude auth login`, then `cswap add`. Check the registered slots
+with:
+
+```sh
+cswap list
+```
+
+Do not invoke add from a `cswap run` session. To refresh an existing account,
+sign into that same identity again with `eggswap add --claude`; cswap updates
+its slot. The sign-in changes the default Claude login, so finish or move any
+process using it first. Work launches still use `cswap run`.
+
+### Codex: add accounts in separate homes
+
+An existing `~/.codex` login can count as the first Codex account. Each
+`eggswap add --codex` chooses the next free private home
+(`~/.local/share/eggswap/codex-2`, then
 `codex-3`, etc.). To choose one yourself, use
 `eggswap add --codex --home /absolute/path`. Eggswap creates the home with a
 file-backed credential-store setting if it is new, delegates authentication

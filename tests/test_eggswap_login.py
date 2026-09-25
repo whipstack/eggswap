@@ -180,6 +180,70 @@ class LoginTests(unittest.TestCase):
         self.assertIn("unset CLAUDE_CONFIG_DIR", output)
         runner.assert_not_called()
 
+    def test_claude_login_refuses_secure_storage_override(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_SECURESTORAGE_CONFIG_DIR": str(self.root / "other") }):
+            runner = mock.Mock()
+            rc, output = self._main(["add", "--claude"], runner)
+        self.assertEqual(rc, 2)
+        self.assertIn("CLAUDE_SECURESTORAGE_CONFIG_DIR", output)
+        runner.assert_not_called()
+
+    def test_claude_login_ignores_ambient_api_credentials(self):
+        calls = []
+
+        def runner(argv, *, env):
+            calls.append((argv, env))
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "unused", "ANTHROPIC_AUTH_TOKEN": "unused"}):
+            rc, output = self._main(["add", "--claude"], runner)
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(len(calls), 2)
+        for _, env in calls:
+            self.assertNotIn("ANTHROPIC_API_KEY", env)
+            self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
+
+    def test_codex_login_ignores_ambient_api_credentials(self):
+        home = self.root / "codex-2"
+        calls = []
+
+        def runner(argv, *, env):
+            calls.append((argv, env))
+            if argv == ["codex", "login"]:
+                _fake_auth(home, "second-account")
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "unused", "CODEX_API_KEY": "unused", "CODEX_ACCESS_TOKEN": "unused"}), \
+             mock.patch("eggswap.cli._default_codex_homes", return_value=[]):
+            rc, output = self._main(["add", "--codex", "--home", str(home)], runner)
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(len(calls), 2)
+        for _, env in calls:
+            self.assertNotIn("OPENAI_API_KEY", env)
+            self.assertNotIn("CODEX_API_KEY", env)
+            self.assertNotIn("CODEX_ACCESS_TOKEN", env)
+            self.assertEqual(env["CODEX_HOME"], str(home.resolve()))
+
+    def test_add_requires_terminal_but_help_does_not(self):
+        with mock.patch.object(cli.sys, "argv", ["eggswap", "add", "--codex"]), \
+             mock.patch.object(cli.sys, "stdin") as stdin, \
+             mock.patch.object(cli.sys, "stderr", new_callable=io.StringIO) as stderr, \
+             mock.patch.object(cli, "main") as main:
+            stdin.isatty.return_value = False
+            with self.assertRaises(SystemExit) as stopped:
+                cli.main_entry()
+            self.assertEqual(stopped.exception.code, 2)
+            self.assertIn("terminal", stderr.getvalue())
+            main.assert_not_called()
+        with mock.patch.object(cli.sys, "argv", ["eggswap", "add", "--help"]), \
+             mock.patch.object(cli.sys, "stdin") as stdin, \
+             mock.patch.object(cli, "main", return_value=0) as main:
+            stdin.isatty.return_value = False
+            with self.assertRaises(SystemExit) as stopped:
+                cli.main_entry()
+            self.assertEqual(stopped.exception.code, 0)
+            main.assert_called_once_with(["add", "--help"])
+
     def test_unreadable_catalog_refuses_instead_of_hiding_enrollment(self):
         self.state.mkdir()
         (self.state / "codex_homes.json").write_text("{broken")
