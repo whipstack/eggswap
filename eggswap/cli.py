@@ -704,10 +704,18 @@ def _cmd_profile_enabled(adapters, profile_key: str, *, enabled: bool, store, ou
 
 
 def _subscription_login_env(provider: str) -> dict[str, str]:
-    """Keep ambient API credentials from overriding an interactive login."""
+    """Keep ambient credentials from overriding interactive account selection."""
     env = dict(os.environ)
     if provider == "claude":
-        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        for name in (
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+            "CLAUDE_CODE_OAUTH_SCOPES",
+            "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_PROFILE",
+            "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
+            "ANTHROPIC_IDENTITY_TOKEN_FILE",
+        ):
             env.pop(name, None)
     else:
         for name in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"):

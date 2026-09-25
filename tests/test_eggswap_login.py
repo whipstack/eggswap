@@ -188,20 +188,35 @@ class LoginTests(unittest.TestCase):
         self.assertIn("CLAUDE_SECURESTORAGE_CONFIG_DIR", output)
         runner.assert_not_called()
 
-    def test_claude_login_ignores_ambient_api_credentials(self):
+    def test_claude_login_ignores_ambient_credentials(self):
         calls = []
 
         def runner(argv, *, env):
             calls.append((argv, env))
             return SimpleNamespace(returncode=0)
 
-        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "unused", "ANTHROPIC_AUTH_TOKEN": "unused"}):
+        with mock.patch.dict(os.environ, {
+            "ANTHROPIC_API_KEY": "unused",
+            "ANTHROPIC_AUTH_TOKEN": "unused",
+            "CLAUDE_CODE_OAUTH_TOKEN": "unused",
+            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN": "unused",
+            "CLAUDE_CODE_OAUTH_SCOPES": "unused",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "ANTHROPIC_PROFILE": "other",
+            "ANTHROPIC_FEDERATION_RULE_ID": "unused",
+        }):
             rc, output = self._main(["add", "--claude"], runner)
         self.assertEqual(rc, 0, output)
         self.assertEqual(len(calls), 2)
         for _, env in calls:
             self.assertNotIn("ANTHROPIC_API_KEY", env)
             self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
+            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
+            self.assertNotIn("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", env)
+            self.assertNotIn("CLAUDE_CODE_OAUTH_SCOPES", env)
+            self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", env)
+            self.assertNotIn("ANTHROPIC_PROFILE", env)
+            self.assertNotIn("ANTHROPIC_FEDERATION_RULE_ID", env)
 
     def test_codex_login_ignores_ambient_api_credentials(self):
         home = self.root / "codex-2"
