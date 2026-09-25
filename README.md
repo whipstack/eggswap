@@ -4,7 +4,7 @@ One local tool to choose and run work on your own Claude and Codex accounts.
 It reads Claude accounts from `cswap` and Codex accounts from separate
 `CODEX_HOME` directories. It does not store or copy credentials.
 
-## Install
+## Start here
 
 Requires Python 3.10+, `cswap` for Claude, and the `codex` CLI for Codex.
 Install the published wheel (Eggswap is not published to PyPI):
@@ -16,14 +16,8 @@ eggswap status
 
 Or, from a checkout: `python3 -m pip install -e .`. Runtime dependencies are
 stdlib only; supported platforms are macOS and Linux.
-The v0.1.1 wheel supports the explicit `--claude` and `--codex` commands below;
-the bare `eggswap add` menu is in the repository source pending the next release.
-On newer installs, run `eggswap --version` to see which release is active.
-
-## Add two Claude and two Codex accounts
-
-Run these in **your own terminal**. Finish each browser login before starting
-the next. Use a different account for each provider's second login.
+Add two accounts from each provider in your own terminal. Finish each browser
+login before starting the next one, and choose a different account each time:
 
 ```sh
 eggswap add --claude
@@ -34,17 +28,17 @@ eggswap list
 eggswap status
 ```
 
-Each `add` prints the account key it registered. If `eggswap list` already
-shows an account, skip its add command. `eggswap add` without a flag offers a
-Claude/Codex menu. Eggswap invokes `claude auth login` or `codex login`;
-you complete authentication there. It never asks you to paste a token.
+Skip an `add` if that account is already in `eggswap list`. Each successful
+command prints its account key. Eggswap opens the provider's own login; you
+complete it in the browser. Eggswap never asks for a token. The published
+v0.1.1 wheel supports `--claude` and `--codex`; the no-flag `eggswap add`
+menu is in the next release. Check your version with `eggswap --version`.
 
-`eggswap list` checks **discovery**: you should see two distinct `claude:N`
-keys and two distinct `codex:<id>` keys. `eggswap status` checks whether those
-profiles are currently **schedulable**. A fresh profile may have `UNKNOWN`
-capacity; it remains listed but cannot be selected until the provider reports
-usable quota. A second Codex home alone does not prove credential isolation;
-Eggswap reports `UNKNOWN` when it cannot verify an effective file-backed store.
+`eggswap list` should show two distinct `claude:N` keys and two distinct
+`codex:<id>` keys. `eggswap status` shows which can run work now. A new
+account can appear in the list with `UNKNOWN` capacity until the provider
+reports usable quota. For Codex, separate home directories alone do not prove
+credential isolation; an unverified credential store also reports `UNKNOWN`.
 
 To check a particular profile without launching work, copy its exact key from
 `eggswap list` and run:
@@ -54,11 +48,9 @@ eggswap select --pin 'claude:1'
 eggswap run --dry-run 'claude:1' -- --version
 ```
 
-Replace `claude:1` with the key you are checking. Repeat for the other three
-keys. `select --pin` refuses unavailable profiles (exit 3); `run --dry-run`
-shows the launch binding without a model request or lease. Neither command
-proves that the browser used the intended human account; check Claude identity
-with `cswap list` and the Codex account IDs in `eggswap list`.
+Replace `claude:1` with each of your four keys. `select --pin` refuses an
+unavailable profile; `run --dry-run` shows its launch without starting work.
+Check the human accounts in `cswap list` and the Codex IDs in `eggswap list`.
 
 ### If sign-in does not work
 

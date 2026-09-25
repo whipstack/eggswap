@@ -731,7 +731,8 @@ def _cmd_login(args, *, runner, out, quarantine=None) -> int:
             return 2
         try:
             env = _clean_provider_env("claude")
-            print("Opening Claude sign-in; choose the account to add in your browser.",
+            print("Opening Claude sign-in through the default login. Choose the account in your browser; "
+                  "Eggswap will register it with cswap afterward.",
                   file=out, flush=True)
             login = runner(["claude", "auth", "login"], env=env)
             if login.returncode:
