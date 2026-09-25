@@ -711,7 +711,7 @@ def _clean_provider_env(provider: str) -> dict[str, str]:
             if not name.startswith(prefixes)}
 
 
-def _cmd_login(args, *, runner, out) -> int:
+def _cmd_login(args, *, runner, out, quarantine=None) -> int:
     """Delegate interactive authentication to the provider's own CLI.
 
     Eggswap never receives a token on stdin or in argv. Codex enrollment
@@ -729,6 +729,18 @@ def _cmd_login(args, *, runner, out) -> int:
             login = runner(["claude", "auth", "login"], env=env)
             if login.returncode:
                 return login.returncode
+            expected_identity = None
+            try:
+                identity_status = runner(["claude", "auth", "status", "--json"],
+                                         env=env, capture_output=True, text=True, timeout=30)
+                if identity_status.returncode == 0:
+                    identity = json.loads(identity_status.stdout)
+                    if (isinstance(identity, dict) and identity.get("loggedIn") is True
+                            and isinstance(identity.get("email"), str)
+                            and identity["email"]):
+                        expected_identity = (identity["email"], identity.get("orgId") or "")
+            except (OSError, subprocess.SubprocessError, TypeError, ValueError, AttributeError):
+                pass
             capture = runner(["cswap", "add"], env=env)
         except OSError as exc:
             print(f"eggswap add --claude: provider CLI unavailable: {exc}", file=out)
@@ -736,7 +748,38 @@ def _cmd_login(args, *, runner, out) -> int:
         if capture.returncode:
             print("eggswap add --claude: cswap did not register the login", file=out)
             return capture.returncode
-        print("Claude login registered in cswap; run eggswap list to inspect it", file=out)
+        # cswap add makes the captured slot active. Read structured status and
+        # compare its identity with the native login before naming a slot.
+        slot = None
+        active = None
+        try:
+            status = runner(["cswap", "status", "--json"], env=env,
+                            capture_output=True, text=True, timeout=30)
+            if status.returncode == 0:
+                active = json.loads(status.stdout).get("active")
+                if (isinstance(active, dict) and active.get("managed") is True
+                        and expected_identity is not None
+                        and (active.get("email"), active.get("organizationUuid") or "")
+                        == expected_identity):
+                    number = active.get("number")
+                    if isinstance(number, int) and not isinstance(number, bool) and number > 0:
+                        slot = number
+        except (OSError, subprocess.SubprocessError, TypeError, ValueError, AttributeError):
+            pass
+        if slot is None:
+            print("eggswap add --claude: cswap add finished, but its account could not be identified; inspect cswap list and eggswap list", file=out)
+            return 3
+        print(f"cswap add finished; current snapshot shows claude:{slot}. Verify its identity with cswap list, then inspect capacity with eggswap list", file=out)
+        if quarantine is not None:
+            failure = quarantine.reason(f"claude:{slot}")
+            if failure is not None and failure.kind == AUTH_DEAD:
+                # Slot numbers can change via cswap move/swap between status
+                # and this point. A human must confirm the account currently
+                # in the slot before releasing its old quarantine.
+                if isinstance(active, dict) and active.get("usageStatus") == "ok":
+                    print(f"claude:{slot} remains quarantined; verify it with cswap list, then run eggswap clear claude:{slot}", file=out)
+                else:
+                    print(f"claude:{slot} remains quarantined; inspect its login and capacity with eggswap list", file=out)
         return 0
 
     if not args.home:
@@ -822,8 +865,28 @@ def _next_codex_home() -> Path:
     raise ValueError("no free Eggswap Codex home slot")
 
 
-def _cmd_add(args, *, runner, out) -> int:
-    """The short, provider-flag spelling for interactive account enrollment."""
+def _cmd_add(args, *, runner, out, quarantine=None) -> int:
+    """Interactive account enrollment, with optional explicit provider flags."""
+    if not args.codex and not args.claude:
+        print("Add an account: [1] Claude  [2] Codex  [q] Cancel", file=out)
+        try:
+            choice = input("Choose provider [1/2]: ").strip().lower()
+        except KeyboardInterrupt:
+            print("eggswap add: cancelled", file=out)
+            return 130
+        except EOFError:
+            print("eggswap add: cancelled", file=out)
+            return 2
+        if choice in ("1", "claude"):
+            args.claude = True
+        elif choice in ("2", "codex"):
+            args.codex = True
+        elif choice in ("q", "quit"):
+            print("eggswap add: cancelled", file=out)
+            return 2
+        else:
+            print("eggswap add: choose 1 for Claude or 2 for Codex", file=out)
+            return 2
     try:
         home = args.home or (str(_next_codex_home()) if args.codex else None)
     except ValueError as exc:
@@ -834,7 +897,7 @@ def _cmd_add(args, *, runner, out) -> int:
         home=home,
         device_auth=args.device_auth,
     )
-    return _cmd_login(login_args, runner=runner, out=out)
+    return _cmd_login(login_args, runner=runner, out=out, quarantine=quarantine)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -846,9 +909,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     add_parser = sub.add_parser(
         "add", help="sign in and add one Claude or Codex account",
-        epilog="examples: eggswap add --claude | eggswap add --codex | eggswap add --codex --home /absolute/path",
+        epilog="examples: eggswap add | eggswap add --claude | eggswap add --codex | eggswap add --codex --home /absolute/path",
     )
-    provider_flags = add_parser.add_mutually_exclusive_group(required=True)
+    provider_flags = add_parser.add_mutually_exclusive_group()
     provider_flags.add_argument("--codex", action="store_true", help="add a Codex account in a private home")
     provider_flags.add_argument("--claude", action="store_true", help="sign in to Claude, then register it through cswap")
     add_parser.add_argument("--home", help="optional CODEX_HOME; otherwise use the next Eggswap slot")
@@ -905,7 +968,15 @@ def main(
 ) -> int:
     if argv and argv[0] == "add":
         args = _build_parser().parse_args(argv)
-        return _cmd_add(args, runner=runner, out=out)
+        if quarantine is None:
+            add_quarantine_path = (
+                Path(quarantine_path) if quarantine_path is not None else default_quarantine_path()
+            )
+            add_quarantine = load_quarantine(add_quarantine_path)
+        else:
+            add_quarantine = quarantine or None
+            add_quarantine_path = None
+        return _cmd_add(args, runner=runner, out=out, quarantine=add_quarantine)
     if argv in (["run", "--help"], ["run", "-h"]):
         print("usage: eggswap run [--dry-run] <profile-key> -- <command> [args...]", file=out)
         print("Claude: arguments after -- go to claude through cswap run", file=out)

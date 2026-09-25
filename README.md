@@ -36,6 +36,10 @@ the four exact profile keys from that output for the checks below. An
 interactive terminal is required for sign-in; Eggswap delegates authentication
 to the provider's CLI and never asks for a token.
 
+You can also run `eggswap add` and choose Claude or Codex from a short prompt.
+The explicit provider flags above are useful when following a repeatable setup
+checklist. Press `q` to cancel before a provider login starts.
+
 ### Claude: add accounts to cswap
 
 Eggswap runs `claude auth login`, then `cswap add`. Check the registered slots
@@ -44,6 +48,19 @@ with:
 ```sh
 cswap list
 ```
+
+Claude's [CLI reference](https://code.claude.com/docs/en/cli-reference)
+documents the native browser login and structured authentication status.
+
+After capture, Eggswap shows a snapshot of the `claude:N` slot when native
+Claude auth and `cswap status --json` report the same identity. Verify the
+identity in `cswap list`: another `cswap auto`, `switch`, `move`, or `swap`
+process can change the global account or its slot during enrollment. Avoid
+concurrent switching while you add accounts. If that slot remains in
+`AUTH_DEAD` quarantine, verify its current identity with `cswap list`, then
+run `eggswap clear claude:N`. Eggswap does not clear it automatically because
+`cswap move` or `cswap swap` can change who owns a numbered slot. If Eggswap
+cannot confirm the captured slot, inspect `cswap list` and `eggswap list`.
 
 Do not invoke add from a `cswap run` session. To refresh an existing account,
 sign into that same identity again with `eggswap add --claude`; cswap updates
@@ -60,6 +77,9 @@ An existing `~/.codex` login can count as the first Codex account. Each
 file-backed credential-store setting if it is new, delegates authentication
 to `codex login`, and remembers only the home path.
 It never handles the credential. For a device-code flow, add `--device-auth`.
+The [Codex CLI reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli#codex-login)
+documents both login flows; its [authentication guide](https://learn.chatgpt.com/docs/auth#credential-storage)
+explains why each home explicitly uses file-backed credentials.
 Do not copy `auth.json` between homes. Existing `EGGSWAP_CODEX_HOMES` (paths
 separated by `:` on macOS/Linux) and `CODEX_HOME` remain supported; the
 enrolled home is remembered across shells without an environment variable.

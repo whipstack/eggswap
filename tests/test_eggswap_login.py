@@ -12,6 +12,7 @@ from unittest import mock
 
 from eggswap import cli
 from eggswap.core.codex_homes import enroll_codex_home, enrolled_codex_homes, exclusive_login
+from eggswap.core.quarantine import AUTH_DEAD, Quarantine
 
 
 def _fake_auth(home: Path, account_id: str) -> None:
@@ -35,9 +36,9 @@ class LoginTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
-    def _main(self, argv, runner):
+    def _main(self, argv, runner, **kwargs):
         output = io.StringIO()
-        rc = cli.main(argv, out=output, runner=runner)
+        rc = cli.main(argv, out=output, runner=runner, **kwargs)
         return rc, output.getvalue()
 
     def test_codex_add_chooses_next_free_home(self):
@@ -164,13 +165,197 @@ class LoginTests(unittest.TestCase):
     def test_claude_login_delegates_to_native_cli_then_cswap(self):
         calls = []
 
-        def runner(argv, *, env):
+        def runner(argv, *, env, **kwargs):
             calls.append(argv)
+            if argv == ["claude", "auth", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "loggedIn": True, "email": "one@example.test", "orgId": "org-one",
+                }))
+            if argv == ["cswap", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "active": {"managed": True, "number": 1, "usageStatus": "ok",
+                               "email": "one@example.test", "organizationUuid": "org-one"},
+                }))
             return SimpleNamespace(returncode=0)
 
         rc, output = self._main(["add", "--claude"], runner)
         self.assertEqual(rc, 0, output)
-        self.assertEqual(calls, [["claude", "auth", "login"], ["cswap", "add"]])
+        self.assertEqual(calls, [["claude", "auth", "login"],
+                                 ["claude", "auth", "status", "--json"],
+                                 ["cswap", "add"],
+                                 ["cswap", "status", "--json"]])
+        self.assertIn("claude:1", output)
+
+    def test_claude_refresh_names_quarantined_slot_without_clearing(self):
+        quarantine = Quarantine()
+        quarantine.record("claude:1", AUTH_DEAD)
+        quarantine.record("claude:2", AUTH_DEAD)
+
+        def runner(argv, *, env, **kwargs):
+            if argv == ["claude", "auth", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "loggedIn": True, "email": "one@example.test", "orgId": "org-one",
+                }))
+            if argv == ["cswap", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "active": {"managed": True, "number": 1, "usageStatus": "ok",
+                               "email": "one@example.test", "organizationUuid": "org-one"},
+                }))
+            return SimpleNamespace(returncode=0)
+
+        rc, output = self._main(["add", "--claude"], runner, quarantine=quarantine)
+        self.assertEqual(rc, 0, output)
+        self.assertTrue(quarantine.is_quarantined("claude:1"))
+        self.assertTrue(quarantine.is_quarantined("claude:2"))
+        self.assertIn("eggswap clear claude:1", output)
+
+    def test_failed_capture_preserves_auth_dead_quarantine(self):
+        quarantine = Quarantine()
+        quarantine.record("claude:1", AUTH_DEAD)
+
+        def runner(argv, *, env, **kwargs):
+            return SimpleNamespace(returncode=1 if argv == ["cswap", "add"] else 0)
+
+        rc, _ = self._main(["add", "--claude"], runner, quarantine=quarantine)
+        self.assertEqual(rc, 1)
+        self.assertTrue(quarantine.is_quarantined("claude:1"))
+
+    def test_unconfirmed_claude_slot_preserves_quarantine(self):
+        quarantine = Quarantine()
+        quarantine.record("claude:1", AUTH_DEAD)
+
+        def runner(argv, *, env, **kwargs):
+            if argv == ["cswap", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout='{"active":{"managed":false}}')
+            return SimpleNamespace(returncode=0)
+
+        rc, output = self._main(["add", "--claude"], runner, quarantine=quarantine)
+        self.assertEqual(rc, 3, output)
+        self.assertTrue(quarantine.is_quarantined("claude:1"))
+
+    def test_claude_refresh_preserves_persisted_quarantine(self):
+        path = self.state / "quarantine.json"
+        quarantine = Quarantine()
+        quarantine.record("claude:1", AUTH_DEAD)
+        cli.save_quarantine(quarantine, path)
+
+        def runner(argv, *, env, **kwargs):
+            if argv == ["claude", "auth", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "loggedIn": True, "email": "one@example.test", "orgId": "org-one",
+                }))
+            if argv == ["cswap", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "active": {"managed": True, "number": 1, "usageStatus": "ok",
+                               "email": "one@example.test", "organizationUuid": "org-one"},
+                }))
+            return SimpleNamespace(returncode=0)
+
+        rc, output = self._main(["add", "--claude"], runner)
+        self.assertEqual(rc, 0, output)
+        self.assertTrue(cli.load_quarantine(path).is_quarantined("claude:1"))
+        self.assertIn("eggswap clear claude:1", output)
+
+    def test_still_dead_claude_slot_preserves_quarantine(self):
+        quarantine = Quarantine()
+        quarantine.record("claude:1", AUTH_DEAD)
+
+        def runner(argv, *, env, **kwargs):
+            if argv == ["claude", "auth", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "loggedIn": True, "email": "one@example.test", "orgId": "org-one",
+                }))
+            if argv == ["cswap", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "active": {"managed": True, "number": 1,
+                               "usageStatus": "relogin_required",
+                               "email": "one@example.test", "organizationUuid": "org-one"},
+                }))
+            return SimpleNamespace(returncode=0)
+
+        rc, output = self._main(["add", "--claude"], runner, quarantine=quarantine)
+        self.assertEqual(rc, 0, output)
+        self.assertTrue(quarantine.is_quarantined("claude:1"))
+        self.assertNotIn("eggswap clear", output)
+
+    def test_concurrent_active_switch_cannot_clear_another_slot(self):
+        quarantine = Quarantine()
+        quarantine.record("claude:2", AUTH_DEAD)
+
+        def runner(argv, *, env, **kwargs):
+            if argv == ["claude", "auth", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "loggedIn": True, "email": "one@example.test", "orgId": "org-one",
+                }))
+            if argv == ["cswap", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "active": {"managed": True, "number": 2, "usageStatus": "ok",
+                               "email": "other@example.test", "organizationUuid": "org-two"},
+                }))
+            return SimpleNamespace(returncode=0)
+
+        rc, output = self._main(["add", "--claude"], runner, quarantine=quarantine)
+        self.assertEqual(rc, 3, output)
+        self.assertTrue(quarantine.is_quarantined("claude:2"))
+        self.assertNotIn("registered claude:2", output)
+
+    def test_missing_usage_status_does_not_clear_quarantine(self):
+        quarantine = Quarantine()
+        quarantine.record("claude:1", AUTH_DEAD)
+
+        def runner(argv, *, env, **kwargs):
+            if argv == ["claude", "auth", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "loggedIn": True, "email": "one@example.test", "orgId": "org-one",
+                }))
+            if argv == ["cswap", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "active": {"managed": True, "number": 1,
+                               "email": "one@example.test", "organizationUuid": "org-one"},
+                }))
+            return SimpleNamespace(returncode=0)
+
+        rc, output = self._main(["add", "--claude"], runner, quarantine=quarantine)
+        self.assertEqual(rc, 0, output)
+        self.assertTrue(quarantine.is_quarantined("claude:1"))
+        self.assertNotIn("eggswap clear", output)
+
+    def test_bare_add_prompts_for_claude(self):
+        calls = []
+
+        def runner(argv, *, env, **kwargs):
+            calls.append(argv)
+            if argv == ["claude", "auth", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "loggedIn": True, "email": "one@example.test", "orgId": "org-one",
+                }))
+            if argv == ["cswap", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "active": {"managed": True, "number": 1,
+                               "email": "one@example.test", "organizationUuid": "org-one"},
+                }))
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch("builtins.input", return_value="1"):
+            rc, output = self._main(["add"], runner)
+        self.assertEqual(rc, 0, output)
+        self.assertIn("[1] Claude", output)
+        self.assertEqual(calls, [["claude", "auth", "login"],
+                                 ["claude", "auth", "status", "--json"],
+                                 ["cswap", "add"], ["cswap", "status", "--json"]])
+
+    def test_bare_add_can_cancel_before_provider_login(self):
+        for choice, expected in (("q", 2), ("unknown", 2)):
+            with self.subTest(choice=choice), mock.patch("builtins.input", return_value=choice):
+                runner = mock.Mock()
+                rc, _ = self._main(["add"], runner)
+                self.assertEqual(rc, expected)
+                runner.assert_not_called()
+        with mock.patch("builtins.input", side_effect=KeyboardInterrupt):
+            runner = mock.Mock()
+            rc, _ = self._main(["add"], runner)
+            self.assertEqual(rc, 130)
+            runner.assert_not_called()
 
     def test_claude_login_refuses_session_home_before_mutation(self):
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.root / "session")}):
@@ -191,8 +376,17 @@ class LoginTests(unittest.TestCase):
     def test_claude_login_ignores_ambient_credentials(self):
         calls = []
 
-        def runner(argv, *, env):
+        def runner(argv, *, env, **kwargs):
             calls.append((argv, env))
+            if argv == ["claude", "auth", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "loggedIn": True, "email": "one@example.test", "orgId": "org-one",
+                }))
+            if argv == ["cswap", "status", "--json"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "active": {"managed": True, "number": 1,
+                               "email": "one@example.test", "organizationUuid": "org-one"},
+                }))
             return SimpleNamespace(returncode=0)
 
         with mock.patch.dict(os.environ, {
@@ -211,7 +405,7 @@ class LoginTests(unittest.TestCase):
         }):
             rc, output = self._main(["add", "--claude"], runner)
         self.assertEqual(rc, 0, output)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 4)
         for _, env in calls:
             self.assertNotIn("ANTHROPIC_API_KEY", env)
             self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
