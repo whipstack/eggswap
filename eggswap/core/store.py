@@ -93,8 +93,13 @@ class LeaseStore:
         except FileNotFoundError:
             return None
         if not text:
-            return None
-        return json.loads(text)
+            # An existing record may have lost an operator veto or fence.
+            # Only absence is a new profile; corruption requires recovery.
+            raise ValueError(f"empty lease state file: {path.name}")
+        record = json.loads(text)
+        if not isinstance(record, dict):
+            raise ValueError(f"invalid lease state file (expected object): {path.name}")
+        return record
 
     def _write_raw(self, path: Path, record: dict) -> None:
         """Atomic commit: write to a tmp file, fsync, then os.replace.
