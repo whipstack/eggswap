@@ -49,6 +49,10 @@ DEFAULT_MAX_AGE_SECONDS = 300.0
 DEFAULT_LEASE_TTL_SECONDS = 3600.0
 
 
+class _ChildCleanupFailed(RuntimeError):
+    """The child could not be reaped, so its hold must not be released early."""
+
+
 def _stop_child(process) -> None:
     """Stop the process tree after lease loss; do not leave fenced work running."""
     try:
@@ -57,7 +61,7 @@ def _stop_child(process) -> None:
         else:
             process.terminate()
     except ProcessLookupError:
-        return
+        pass  # The group is gone; wait below still reaps our child.
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -78,19 +82,30 @@ def _run_leased(argv, env, *, store, lease, ttl_seconds, popen_factory):
         process_options["start_new_session"] = True
     process = popen_factory(argv, **process_options)
     heartbeat = min(60.0, ttl_seconds / 3.0)
-    while True:
-        try:
-            return process.wait(timeout=heartbeat), False
-        except subprocess.TimeoutExpired:
-            # Renew only a still-live lease. If its fence was replaced or it
-            # expired while the process was descheduled, stop the child before
-            # returning control to a caller that might launch replacement work.
+    try:
+        while True:
             try:
-                lease = store.renew(lease, ttl_seconds=ttl_seconds)
-                store.revalidate(lease)
-            except (LeaseError, StaleFence):
-                _stop_child(process)
-                return process.returncode if process.returncode is not None else 10, True
+                return process.wait(timeout=heartbeat), False
+            except subprocess.TimeoutExpired:
+                # Renew only a still-live lease. If its fence was replaced or it
+                # expired while the process was descheduled, stop the child before
+                # returning control to a caller that might launch replacement work.
+                try:
+                    lease = store.renew(lease, ttl_seconds=ttl_seconds)
+                    store.revalidate(lease)
+                except (LeaseError, StaleFence):
+                    _stop_child(process)
+                    return process.returncode if process.returncode is not None else 10, True
+    except BaseException:
+        # A new-session child does not receive the parent's terminal interrupt.
+        # Finish cleanup before the caller can free the exclusive account hold.
+        try:
+            _stop_child(process)
+        except BaseException as cleanup_error:
+            raise _ChildCleanupFailed(
+                "child cleanup failed; lease retained until its normal expiry"
+            ) from cleanup_error
+        raise
 
 
 def default_lease_root() -> Path:
@@ -618,6 +633,7 @@ def _cmd_run(
     except LeaseError as exc:
         print(f"eggswap run: {profile.key} is held -- {exc}", file=out)
         return 10
+    release_lease = True
     try:
         # Reservation may wait behind another process. Re-read capacity after
         # acquiring the fence so a quota transition during that wait cannot
@@ -661,18 +677,22 @@ def _cmd_run(
             pre_launch_auth_dead=pre_launch_auth_dead,
         )
         return returncode
+    except _ChildCleanupFailed:
+        release_lease = False
+        raise
     finally:
-        try:
-            store.release(lease)
-        except StaleFence:
-            # Our hold was reaped and re-granted while the child ran. Releasing
-            # would evict the legitimate new holder, so refuse -- loudly, since
-            # it means the child outlived its lease.
-            print(
-                f"eggswap run: lease on {profile.key} was superseded during the "
-                "run; not releasing the replacement's hold",
-                file=out,
-            )
+        if release_lease:
+            try:
+                store.release(lease)
+            except StaleFence:
+                # Our hold was reaped and re-granted while the child ran. Releasing
+                # would evict the legitimate new holder, so refuse -- loudly, since
+                # it means the child outlived its lease.
+                print(
+                    f"eggswap run: lease on {profile.key} was superseded during the "
+                    "run; not releasing the replacement's hold",
+                    file=out,
+                )
 
 
 def _cmd_clear(profile_key: str, quarantine, quarantine_path: Optional[Path], out) -> int:
